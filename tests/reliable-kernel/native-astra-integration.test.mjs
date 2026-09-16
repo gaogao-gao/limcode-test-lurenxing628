@@ -335,11 +335,17 @@ for (const transport of ['http', 'websocket']) test(`review P1-2真实authority 
     await h.stored.enableCompression();
     h.completed(connection(first), 'review-high-1', [call]);
     h.releaseTool.resolve();
-    const frame = await h.until(() => h.frames[3], 'tool continuation after automatic compression');
-    // Complete the synthetic request even when its body exposes the bug, so cleanup is bounded.
+    const continuation = await h.until(() => h.frames[3], 'same-request native tool continuation');
+    h.created(connection(continuation), 'review-tool-finished');
+    h.completed(connection(continuation), 'review-tool-finished', [h.text(connection(continuation), 'review-tool-finished', 0, 'done')]);
+    assert.equal((await turn.completion).terminalStatus, 'completed');
+    // Native continuation above intentionally belongs to the old frozen ModelRequest. Only a
+    // new request enters the ordinary freeze/compression path and may use the reset selection.
+    const next = await h.startTurn('review-new-request-reset', 'new request after tool completion');
+    const frame = await h.until(() => h.frames[4], 'new ordinary request after automatic compression');
     h.created(connection(frame), 'review-restored');
     h.completed(connection(frame), 'review-restored', [h.text(connection(frame), 'review-restored', 0, 'done')]);
-    assert.equal((await turn.completion).terminalStatus, 'completed');
+    assert.equal((await next.completion).terminalStatus, 'completed');
     assert.ok((await rows(h.app, 'CompressionBlock')).length > 0, 'real automatic compression must have executed');
     assert.equal(frame.body.reasoning?.effort, undefined);
     assert.deepEqual(frame.body.input.filter(item => item.type === 'configuration_update'), []);
