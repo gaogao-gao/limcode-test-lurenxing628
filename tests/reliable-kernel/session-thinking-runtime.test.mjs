@@ -60,6 +60,7 @@ async function fixture(run, hooks = {}) {
       mcpPolicyGate: { async authorize() { return { toolPolicyAllowed: true, planReviewAllowed: true }; } },
       providers: { resolve(providerId) { return { providerId, async sendFullRequest(request, controls) {
         requests.push(request);
+        if (request.recipe.kind === 'reliable-context-compression' && hooks.send) return hooks.send(request, controls, f);
         let projected;
         const adapter = new kernel.LlmCapabilityFullRequestAdapter(providerId, {
           start(input, emit) { projected = input; emit({ type: LlmEventType.Done, payload: { requestId: input.id } }); }, abort() {}, dispose() {}
@@ -133,6 +134,42 @@ test('review P2-4非法Claude覆盖只拒绝本次保存，原会话仍按默认
     assert.equal((await f.app.agentLoop.runInput(f.input('claude-legal-sampling'))).terminalStatus, 'completed');
     assert.equal(f.wires[1].body.top_p, .95);
     assert.equal(f.wires[1].body.thinking.budget_tokens, 2048);
+  });
+});
+
+for (const transport of ['http', 'websocket']) test(`review P1-2同Turn普通请求真实authority压缩fresh update不覆盖本次默认 ${transport}`, async () => {
+  let setThinking, enableCompression, toolCount = 0;
+  await fixture(async f => {
+    const provider = { ...f.provider, provider: 'openai-responses', model: 'gpt-6-astra', models: [{ id: 'gpt-6-astra', name: 'Astra' }], generationConfig: {}, openaiResponsesTransport: transport, nativeResponses: { enabled: true, reasoningUpdates: true, asyncTools: false, steering: false, multiplexing: false } };
+    await f.save('llmProviderConfigs', { configs: [provider] });
+    const defaults = require('../../dist/extension/shared/protocol.js').createDefaultLlmCompressionConfig('native synthetic compression');
+    const compression = { ...defaults, kind: 'llm_summary', bodyTargetTokens: 4096, llmSummary: { targetTokens: 1024 }, trigger: { mode: 'manual', thresholdUnit: 'tokens', thresholdTokens: 120000 } };
+    await f.save('llmCompressionConfigs', { configs: [compression] });
+    await f.save('llmCompression', { defaultConfigId: compression.id, providerBindings: [], modelBindings: [] });
+    setThinking = value => f.configuration.mutations.setModelProfile({ scopeKind: 'conversation', scopeId: 'parent', providerConfigId: provider.id, provider: provider.provider, model: provider.model, thinkingOverride: value ? { kind: 'openai-effort', value } : null });
+    enableCompression = () => f.save('llmCompressionConfigs', { configs: [{ ...compression, trigger: { mode: 'token_threshold', thresholdUnit: 'tokens', thresholdTokens: 10000 } }] });
+    const seed = await f.app.turns.input({ ...f.input('native-history'), content: 'synthetic historical evidence '.repeat(18000) });
+    await f.app.turns.terminal({ source: { kind: 'internal', key: 'native-history-done' }, turnId: seed.turnId, terminalStatus: 'completed', reason: 'synthetic' });
+    await setThinking('low');
+    assert.equal((await f.app.agentLoop.runInput(f.input('native-low'))).terminalStatus, 'completed');
+    await setThinking('high');
+    assert.equal((await f.app.agentLoop.runInput(f.input('native-high-reset'))).terminalStatus, 'completed');
+    assert.equal((await f.list('CompressionBlock')).length, 1);
+    assert.equal(toolCount, 2);
+    const body = f.wires.at(-1).body;
+    assert.equal(body.reasoning?.effort, undefined);
+    assert.deepEqual(body.input.filter(item => item.type === 'configuration_update'), []);
+    const recipe = f.requests.at(-1).recipe;
+    assert.equal(recipe.nativeReasoning.effectiveEffort, undefined);
+    assert.equal(recipe.nativeReasoning.pendingConfigurationUpdate, undefined);
+    assert.equal((await f.list('ToolModelResult')).length, 2);
+  }, { async tool() { if (++toolCount === 2) { await setThinking(null); await enableCompression(); } },
+    async send(request, controls, f) {
+      const compression = request.recipe.kind === 'reliable-context-compression';
+      const content = compression ? { type: 'compression_result', contents: [{ role: 'user', parts: [{ text: 'synthetic summary' }] }] }
+        : { role: 'model', parts: f.wires.length === 2 || f.wires.length === 3 ? [{ id: `native-counter-${f.wires.length}`, functionCall: { name: 'counter', args: {} } }] : [{ text: 'done' }] };
+      await controls.onEvent({ kind: 'completed', streamSeq: '1', content });
+    }
   });
 });
 
