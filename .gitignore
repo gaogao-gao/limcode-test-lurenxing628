@@ -19,6 +19,7 @@ src copy
 docs/*
 !docs/background-process-reliability.md
 !docs/conversation-storage-authority.md
+!docs/session-thinking-override.md
 !docs/model-context-projection.md
 !docs/architecture/
 docs/architecture/*

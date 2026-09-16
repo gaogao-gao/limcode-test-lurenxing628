@@ -164,11 +164,6 @@ test('同一请求瞬时失败自动重试不读取保存后的思维覆盖', as
 });
 
 
-test('实际 coordinator 从父工具创建/嵌套/继续子会话：最终普通 wire 不继承父覆盖', async () => {
-  await fixture(async f => {
-    await f.set('parent', 'high');
-    await f.app.agentLoop.runInput(f.input('delegate'));
-
 test('已排队输入在实际新请求冻结时采用新值，不追改在途请求', async () => {
   await fixture(async f => {
     await f.set('parent', 'high');
@@ -186,6 +181,12 @@ test('已排队输入在实际新请求冻结时采用新值，不追改在途�
     await controls.onEvent({ kind: 'completed', streamSeq: '1', content: { role: 'model', parts: [{ text: 'done' }] } });
   } });
 });
+
+test('实际 coordinator 从父工具创建/嵌套/继续子会话：最终普通 wire 不继承父覆盖', async () => {
+  await fixture(async f => {
+    await f.set('parent', 'high');
+    await f.app.agentLoop.runInput(f.input('delegate'));
+
 
     await f.coordinator.waitForIdle();
     const childWires = f.wires.filter(w => w.conversationId !== 'parent');
