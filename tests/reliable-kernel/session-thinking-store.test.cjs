@@ -42,7 +42,7 @@ function fixture() {
 const model = { providerConfigId: 'fixture', provider: 'openai-compatible', model: 'o3' };
 function snapshot(scopeId, value, sequence, authorityId = 'root-a') {
   const profile = value === null ? undefined : { id: `profile-${scopeId}`, name: 'fixture', ...model, thinkingOverride: { kind: 'openai-effort', value } };
-  return { scopeKind: 'conversation', scopeId, authorityId, sequence, revision: `etag-${scopeId}-${sequence}`, outcome: 'observed', effectiveModel: model,
+  return { scopeKind: 'conversation', scopeId, authorityId, sessionId: `session-${scopeId}-${authorityId}`, sequence, revision: `etag-${scopeId}-${sequence}`, outcome: 'observed', effectiveModel: model,
     ...(profile ? { profile, link: { id: `link-${scopeId}`, scopeKind: 'conversation', scopeId, modelProfileId: profile.id, role: 'active', createdAt: 1, updatedAt: sequence } } : {}) };
 }
 const choose = (f, scope, value) => f.store.setThinkingForScope(scope, vue.reactive(model), vue.reactive({ kind: 'openai-effort', value }));
@@ -116,6 +116,20 @@ test('无thinking模型失败/超时仍保留通用恢复入口；实际值重�
   const source = fs.readFileSync('webview/src/components/input/Composer.vue', 'utf8');
   assert.match(source, /<ModelProfileSaveStatus v-if="clientState.currentConversationId"/);
   assert.match(fs.readFileSync('webview/src/components/input/ModelProfileSaveStatus.vue', 'utf8'), /放弃草稿并读取已保存值/);
+});
+
+test('显式同root重建scope会话隔离未知旧操作，保留草稿且不永久锁发送', async () => {
+  const f = fixture(); f.read('a'); choose(f, 'a', 'high'); const old = f.requests.at(-1);
+  f.store.rejectPending(old.id, 'unknown request');
+  f.store.refreshScope('conversation', 'a', { adoptRoot: true }); const refresh = f.requests.at(-1);
+  assert.equal(refresh.payload.renewSession, true);
+  f.reply(refresh, { ...snapshot('a', 'low', 2), sessionId: 'renewed-session' });
+  assert.equal(f.store.pendingFor('conversation', 'a'), undefined);
+  assert.equal(f.store.detachedFor('conversation', 'a').profile.thinkingOverride.value, 'high');
+  await f.store.awaitSavedForScope('conversation', 'a');
+  f.reply(old, { ...snapshot('a', 'high', 99), outcome: 'committed' });
+  assert.equal(f.store.confirmedFor('conversation', 'a').profile.thinkingOverride.value, 'low');
+  assert.equal(f.requests.filter(r => r.type === protocol.BridgeMessageType.ModelProfileScopeSet).length, 1);
 });
 
 test('显式新root基线保留旧草稿但不跨代提交；晚old ack/Hello/Error不恢复旧scope', () => {

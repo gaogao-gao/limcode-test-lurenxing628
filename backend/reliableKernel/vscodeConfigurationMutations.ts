@@ -149,20 +149,22 @@ export class VscodeConfigurationMutations {
     return { ...scope, ...pair, ...(effectiveModel ? { effectiveModel } : {}), authorityId: capture.authorityId, sequence: ++this.modelProfileSequence, outcome: 'observed' };
   }
 
-  public readModelProfileScope(capture: ModelProfileRootCapture, input: ModelProfileScopeReadPayload, effective?: () => Promise<ChatModelOverrideRecord | undefined>): Promise<ModelProfileScopeSnapshotPayload> {
+  public readModelProfileScope(capture: ModelProfileRootCapture, input: ModelProfileScopeReadPayload, effective?: () => Promise<ChatModelOverrideRecord | undefined>, externalFence?: () => void): Promise<ModelProfileScopeSnapshotPayload> {
     const scope = normalizeScope(input.scopeKind, input.scopeId);
     return withRecordStoreTransaction(vscode.Uri.joinPath(capture.paths.settingsRootUri, CONFIGURATION_MUTATION_LOCK), async () => {
-      this.assertModelProfileRoot(capture);
-      return this.modelProfileObservation(capture, scope, effective);
+      this.assertModelProfileRoot(capture); externalFence?.();
+      const observed = await this.modelProfileObservation(capture, scope, effective);
+      externalFence?.();
+      return observed;
     });
   }
 
   /** External UI CAS only. Internal child initialization/Fork keep their existing locked methods. */
-  public writeModelProfileScope(capture: ModelProfileRootCapture, payload: ModelProfileScopeSetPayload | { scopeKind: ConfigScopeKind; scopeId?: string; authorityId?: string; expectedRevision?: string }, clear: boolean, effective?: () => Promise<ChatModelOverrideRecord | undefined>): Promise<ModelProfileScopeSnapshotPayload> {
+  public writeModelProfileScope(capture: ModelProfileRootCapture, payload: ModelProfileScopeSetPayload | { scopeKind: ConfigScopeKind; scopeId?: string; authorityId?: string; expectedRevision?: string }, clear: boolean, effective?: () => Promise<ChatModelOverrideRecord | undefined>, externalFence?: () => void): Promise<ModelProfileScopeSnapshotPayload> {
     const scope = normalizeScope(payload.scopeKind, payload.scopeId);
     if (!payload.expectedRevision || payload.authorityId !== capture.authorityId) return Promise.reject(new Error('ModelProfile 保存缺少已确认的 scope revision/authority。请先读取。'));
     return withRecordStoreTransaction(vscode.Uri.joinPath(capture.paths.settingsRootUri, CONFIGURATION_MUTATION_LOCK), async () => {
-      const guard = () => this.assertModelProfileRoot(capture);
+      const guard = () => { this.assertModelProfileRoot(capture); externalFence?.(); };
       guard();
       const before = await this.modelProfilePair(capture.paths, scope);
       if (before.revision !== payload.expectedRevision) throw new Error('ModelProfile 已被其他窗口修改；草稿已保留，请重新读取后决定。');
@@ -203,6 +205,7 @@ export class VscodeConfigurationMutations {
         await this.clearScoped(modelProfileStore(capture.paths), modelProfileLinkStore(capture.paths), scope, link => link.modelProfileId, guard);
       }
       const result = await this.modelProfileObservation(capture, scope, effective);
+      guard();
       return { ...result, outcome: 'committed' };
     });
   }

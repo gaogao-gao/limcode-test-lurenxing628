@@ -105,6 +105,53 @@ async function fixture(run, hooks = {}) {
   }
 }
 
+test('review scope router registers before suspended preflight; after-read waits and explicit session fences late write', async () => {
+  await fixture(async f => {
+    const { VscodeReliableKernelCommandRouter } = require('../../dist/extension/backend/application/reliableKernel/VscodeReliableKernelCommandRouter.js');
+    const { BridgeMessageType: T } = require('../../dist/extension/shared/protocol.js');
+    const messages = [];
+    const webview = { async postMessage(message) { messages.push(structuredClone(message)); return true; } };
+    const product = { configuration: f.configuration, application: f.app, debugCapture: { setListener() {} }, toolHost: { setStateChangeListener() {}, definitionRecords() { return []; }, mcp: { sourceRecords() { return []; } }, skillDefinitions() { return []; }, ruleFiles() { return []; } } };
+    const router = new VscodeReliableKernelCommandRouter(product);
+    const scope = { scopeKind: 'conversation', scopeId: 'parent' };
+    const receive = async id => {
+      const deadline = Date.now() + 8000;
+      while (!messages.some(message => message.correlationId === id)) { if (Date.now() > deadline) throw new Error(`No scope response: ${id}`); await new Promise(resolve => setTimeout(resolve, 5)); }
+      return messages.find(message => message.correlationId === id).payload;
+    };
+    const send = (id, type, payload) => router.handle('scope-client', webview, { id, type, payload });
+    send('initial-scope', T.ModelProfileScopeRead, scope);
+    const initial = await receive('initial-scope');
+    assert.equal(initial.outcome, 'observed'); assert.ok(initial.sessionId);
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    const originalProvider = f.configuration.providerConfig.bind(f.configuration);
+    f.configuration.providerConfig = async id => { await gate; return originalProvider(id); };
+    const selection = { ...scope, ...initial.effectiveModel, authorityId: initial.authorityId, sessionId: initial.sessionId, expectedRevision: initial.revision, operation: 'thinking', expectedEffectiveModel: initial.effectiveModel, thinkingOverride: { kind: 'openai-effort', value: 'high' } };
+    send('suspended-write', T.ModelProfileScopeSet, selection);
+    send('read-after-write', T.ModelProfileScopeRead, { ...scope, authorityId: initial.authorityId, sessionId: initial.sessionId, afterRequestId: 'suspended-write' });
+    await new Promise(resolve => setTimeout(resolve, 30));
+    assert.ok(!messages.some(message => message.correlationId === 'read-after-write'), 'cannot return old state before original preflight settles');
+    send('renew-editor', T.ModelProfileScopeRead, { ...scope, renewSession: true });
+    const renewed = await receive('renew-editor');
+    assert.equal(renewed.profile, undefined); assert.notEqual(renewed.sessionId, initial.sessionId);
+    release();
+    assert.equal((await receive('suspended-write')).outcome, 'uncertain');
+    assert.equal((await receive('read-after-write')).outcome, 'uncertain');
+    send('new-write', T.ModelProfileScopeSet, { ...selection, sessionId: renewed.sessionId, expectedRevision: renewed.revision });
+    const current = await receive('new-write'); assert.equal(current.outcome, 'committed');
+    assert.equal(current.profile.thinkingOverride.value, 'high');
+    // Simulate a failure after a real commit; settled observation must still return the actual pair.
+    const originalWrite = f.configuration.mutations.writeModelProfileScope.bind(f.configuration.mutations);
+    f.configuration.mutations.writeModelProfileScope = async (...args) => { await originalWrite(...args); throw new Error('synthetic post-write failure'); };
+    send('post-write-error', T.ModelProfileScopeSet, { ...selection, sessionId: current.sessionId, expectedRevision: current.revision, thinkingOverride: { kind: 'openai-effort', value: 'medium' } });
+    assert.equal((await receive('post-write-error')).outcome, 'uncertain');
+    send('read-post-error', T.ModelProfileScopeRead, { ...scope, authorityId: current.authorityId, sessionId: current.sessionId, afterRequestId: 'post-write-error' });
+    const observed = await receive('read-post-error');
+    assert.equal(observed.outcome, 'observed'); assert.equal(observed.profile.thinkingOverride.value, 'medium');
+  });
+});
+
 test('review P1-1真实authority无覆盖Astra冻结raw body仍经过适配器清洗', async () => {
   await fixture(async f => {
     const astra = { ...f.provider, provider: 'openai-responses', model: 'gpt-6-astra', models: [{ id: 'gpt-6-astra', name: 'Astra' }], generationConfig: {}, requestBody: { temperature: 0.7, top_logprobs: 5, include: ['message.output_text.logprobs'], custom_field: 'keep' } };

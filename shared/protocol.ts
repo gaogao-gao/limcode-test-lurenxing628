@@ -2702,6 +2702,7 @@ export interface RuntimeContextScopeClearPayload { scopeKind: ConfigScopeKind; s
 export interface ModelProfileScopeSetPayload {
   /** Required at the external UI boundary; internal child/Fork writers use their own locked APIs. */
   authorityId?: string;
+  sessionId?: string;
   expectedRevision?: string;
   operation?: 'select' | 'thinking' | 'reset';
   expectedEffectiveModel?: ChatModelOverrideRecord;
@@ -2714,14 +2715,18 @@ export interface ModelProfileScopeSetPayload {
   provider?: LlmProviderKind;
   model: string;
 }
-export interface ModelProfileScopeClearPayload { scopeKind: ConfigScopeKind; scopeId?: string; authorityId?: string; expectedRevision?: string }
+export interface ModelProfileScopeClearPayload { scopeKind: ConfigScopeKind; scopeId?: string; authorityId?: string; sessionId?: string; expectedRevision?: string }
 export interface ModelProfileScopeReadPayload {
+  /** Explicit scope-editor reconnect fences earlier submissions; it never compensates committed data. */
+  renewSession?: boolean;
+  sessionId?: string;
   scopeKind: ConfigScopeKind;
   scopeId?: string;
   authorityId?: string;
   afterRequestId?: string;
 }
 export interface ModelProfileScopeSnapshotPayload {
+  sessionId?: string;
   scopeKind: ConfigScopeKind;
   scopeId?: string;
   authorityId: string;
