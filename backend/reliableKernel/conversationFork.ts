@@ -232,8 +232,12 @@ export class ConversationForkControlPlane {
       const rightSeq = requireBigInt(right.root_seq, 'ContextSequenceRoot.root_seq');
       return leftSeq < rightSeq ? -1 : leftSeq > rightSeq ? 1 : String(left.id).localeCompare(String(right.id));
     });
+    // Roots after the selected source root can contain messages outside the copied transcript.
+    // Registering them in the target makes later forks select a root whose segments have no
+    // target-scoped provenance. Keep only earlier history; the selected prefix is inserted below.
+    const sourceRootSeq = requireBigInt(sourceRoot.root_seq, 'ContextSequenceRoot.root_seq');
     const historicalSourceRoots = sourceContextRoots.filter((root) =>
-      requireId(root.id, 'ContextSequenceRoot.id') !== command.sourceContextRootId
+      requireBigInt(root.root_seq, 'ContextSequenceRoot.root_seq') < sourceRootSeq
     );
 
     const now = this.timestamp();
