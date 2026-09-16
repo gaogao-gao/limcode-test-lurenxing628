@@ -4297,12 +4297,12 @@ async function resolveRuntimeSettings(
 ): Promise<LlmProviderConfigRecord> {
   const cached = request.invocationId ? resolvedRuntimeSettingsByInvocationId?.get(request.invocationId) : undefined;
   if (cached) return normalizeSettings(cached);
-  const resolved = normalizeSettings(await resolveMaybe(options.settings, request));
-  // Ordinary requests carry the immutable body alongside generation settings. Keep custom
-  // fields intact, but do not let later channel edits change reasoning during a retry/recovery.
-  return request.settingsSnapshot?.generationConfig && request.settingsSnapshot.requestBody !== undefined
-    ? { ...resolved, requestBody: cloneJsonValue(request.settingsSnapshot.requestBody) }
-    : resolved;
+  const resolved = await resolveMaybe(options.settings, request);
+  // Freeze the raw body before normalization, so model adapters remain the final authority.
+  // Never reintroduce unsupported fields after normalizeSettings has removed them.
+  return normalizeSettings(request.settingsSnapshot?.generationConfig && request.settingsSnapshot.requestBody !== undefined
+    ? { ...resolved, requestBody: cloneJsonValue(request.settingsSnapshot.requestBody) } as LlmProviderConfigRecord
+    : resolved);
 }
 
 function snapshotFromSettings(settings: LlmProviderConfigRecord, compressionConfig?: LlmCompressionConfigRecord): LlmInvocationSettingsSnapshotRecord {

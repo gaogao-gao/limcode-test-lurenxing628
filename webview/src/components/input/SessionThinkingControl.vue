@@ -13,7 +13,8 @@ const input = ref('');
 const error = ref('');
 const modelConfig = computed(() => props.config.modelConfigs.find((item) => item.modelId === props.model));
 const generation = computed(() => modelConfig.value ? modelConfig.value.generationConfig : props.config.generationConfig);
-const conflict = computed(() => hasThinkingBodyConflict(props.config.provider, modelConfig.value ? modelConfig.value.requestBody : props.config.requestBody));
+const requestBody = computed(() => modelConfig.value ? modelConfig.value.requestBody : props.config.requestBody);
+const conflict = computed(() => hasThinkingBodyConflict(props.config.provider, requestBody.value));
 const capability = computed(() => sessionThinkingCapability(props.config.provider, props.model, generation.value?.maxOutputTokens));
 const override = computed(() => {
   const profile = store.localProfileFor('conversation', props.conversationId).profile;
@@ -29,7 +30,7 @@ const options = computed(() => {
   if (cap && 'min' in cap) {
     const tokens = [...new Set([...(cap.automatic === undefined ? [] : [cap.automatic]), ...(cap.allowZero ? [0] : []), cap.min, 4096, 8192, 16384, ...((override.value && 'tokens' in override.value) ? [override.value.tokens] : [])])];
     return [...result, ...tokens.filter((value) => {
-      try { validateSessionThinkingOverride({ kind: cap.kind, tokens: value }, props.config.provider, props.model, generation.value); return true; } catch { return false; }
+      try { validateSessionThinkingOverride({ kind: cap.kind, tokens: value }, props.config.provider, props.model, generation.value, requestBody.value); return true; } catch { return false; }
     }).map((value) => ({ value: String(value), label: value === -1 ? '自动（-1）' : `${value} tokens` }))];
   }
   return result;
@@ -41,7 +42,7 @@ function save(value: string): void {
   if (!cap && value !== 'default') return;
   let thinkingOverride: SessionThinkingOverride | null = null;
   try {
-    if (value !== 'default' && cap) thinkingOverride = validateSessionThinkingOverride('min' in cap ? { kind: cap.kind, tokens: Number(value) } : { kind: cap.kind, value: value as never }, props.config.provider, props.model, generation.value);
+    if (value !== 'default' && cap) thinkingOverride = validateSessionThinkingOverride('min' in cap ? { kind: cap.kind, tokens: Number(value) } : { kind: cap.kind, value: value as never }, props.config.provider, props.model, generation.value, requestBody.value);
     store.setProfileForScope('conversation', props.conversationId, { name: '对话临时 LLM', providerConfigId: props.config.id, provider: props.config.provider, model: props.model, thinkingOverride });
   } catch (caught) { error.value = caught instanceof Error ? caught.message : String(caught); }
 }

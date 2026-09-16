@@ -287,7 +287,7 @@ export class VscodeConfigurationMutations {
         const modelConfig = provider.modelConfigs.find((item) => item.modelId === model);
         if (hasThinkingBodyConflict(provider.provider, modelConfig ? modelConfig.requestBody : provider.requestBody)) throw new Error('自定义请求体控制思维或输出参数；请先在渠道设置中解除冲突。');
         const generation = modelConfig ? modelConfig.generationConfig : provider.generationConfig;
-        thinkingOverride = validateSessionThinkingOverride(payload.thinkingOverride, provider.provider, model, generation);
+        thinkingOverride = validateSessionThinkingOverride(payload.thinkingOverride, provider.provider, model, generation, modelConfig ? modelConfig.requestBody : provider.requestBody);
       }
       return this.setScoped(
       modelProfileStore(paths),

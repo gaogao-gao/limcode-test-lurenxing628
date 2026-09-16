@@ -1,4 +1,4 @@
-import type { LlmGenerationConfigRecord, LlmProviderKind, LlmThinkingConfigRecord, LlmThinkingLevel, SessionThinkingOverride } from './protocol';
+import type { LlmGenerationConfigRecord, LlmRequestBodyRecord, LlmProviderKind, LlmThinkingConfigRecord, LlmThinkingLevel, SessionThinkingOverride } from './protocol';
 import { isAstraModel } from './openAIResponsesCapabilities';
 import { geminiThinkingCapabilityForModel, isGeminiThinkingLevelSupported } from './geminiThinking';
 
@@ -19,7 +19,7 @@ export function sessionThinkingCapability(provider: LlmProviderKind, modelId: st
     return undefined;
   }
   if (provider === 'claude') {
-    if (/^claude-(opus|sonnet)-4[.-][6-9](?:-|$)/.test(model)) {
+    if (/^claude-(opus|sonnet)-4[.-]6(?:-\d{8})?$/.test(model)) {
       return { kind: 'claude-effort', values: model.includes('opus') ? ['none', 'low', 'medium', 'high', 'max'] : ['none', 'low', 'medium', 'high'] };
     }
     if (/^claude-(?:3[.-]7-sonnet|(?:sonnet|opus)-4(?:[.-][015])?)(?:-|$)/.test(model) && Number.isSafeInteger(maxOutputTokens) && maxOutputTokens! > 1024) {
@@ -29,18 +29,26 @@ export function sessionThinkingCapability(provider: LlmProviderKind, modelId: st
   }
   if (provider === 'openai-compatible' || provider === 'openai-responses') {
     if (/^o[134](?:-|$)/.test(model) && !/^o1-(?:mini|preview)/.test(model)) return { kind: 'openai-effort', values: ['low', 'medium', 'high'] };
-    if (/^gpt-5(?:[.-]|$)/.test(model) && !/chat|pro/.test(model)) {
-      return { kind: 'openai-effort', values: /^gpt-5(?:-|$)/.test(model) ? ['minimal', 'low', 'medium', 'high'] : ['none', 'low', 'medium', 'high', 'xhigh'] };
-    }
+    if (/^gpt-5(?:-mini|-nano)?(?:-\d{4}-\d{2}-\d{2})?$/.test(model)) return { kind: 'openai-effort', values: ['minimal', 'low', 'medium', 'high'] };
+    if (/^gpt-5\.1(?:-2025-11-13)?$/.test(model)) return { kind: 'openai-effort', values: ['none', 'low', 'medium', 'high'] };
+    if (/^gpt-5\.2(?:-2025-12-11)?$/.test(model)) return { kind: 'openai-effort', values: ['none', 'low', 'medium', 'high', 'xhigh'] };
     if (isAstraModel(model) && provider === 'openai-responses') return { kind: 'openai-effort', values: ['low', 'medium', 'high', 'xhigh', 'max'] };
   }
   if (provider === 'deepseek' && /^deepseek-(?:reasoner|v4)(?:-|$)/.test(model)) return { kind: 'deepseek-effort', values: ['none', 'high', 'max'] };
   return undefined;
 }
 
-export function validateSessionThinkingOverride(value: SessionThinkingOverride, provider: LlmProviderKind, model: string, generation?: LlmGenerationConfigRecord): SessionThinkingOverride {
+export function validateSessionThinkingOverride(value: SessionThinkingOverride, provider: LlmProviderKind, model: string, generation?: LlmGenerationConfigRecord, requestBody?: LlmRequestBodyRecord): SessionThinkingOverride {
   const capability = sessionThinkingCapability(provider, model, generation?.maxOutputTokens);
   if (!value || !capability || value.kind !== capability.kind) throw new Error('当前模型不支持此思维参数，请恢复默认或重新选择。');
+  if (provider === 'claude' && ('tokens' in value || value.value !== 'none')) {
+    const temperature = requestBody && Object.hasOwn(requestBody, 'temperature') ? requestBody.temperature : generation?.temperature;
+    const topK = requestBody && Object.hasOwn(requestBody, 'top_k') ? requestBody.top_k : generation?.topK;
+    const topP = requestBody && Object.hasOwn(requestBody, 'top_p') ? requestBody.top_p : generation?.topP;
+    if ((temperature !== undefined && temperature !== 1) || topK !== undefined || (topP !== undefined && (typeof topP !== 'number' || topP < .95 || topP > 1))) {
+      throw new Error('当前 Claude 思维模式与采样参数冲突：temperature 仅可省略或为 1，top_k 必须省略，top_p 仅可省略或在 0.95–1。未修改渠道采样，请先在渠道设置调整或恢复默认。');
+    }
+  }
   if ('tokens' in value && 'min' in capability) {
     if (!Number.isSafeInteger(value.tokens) || !(value.tokens === capability.automatic || (capability.allowZero && value.tokens === 0) || (value.tokens >= capability.min && value.tokens <= capability.max))) throw new Error('思维预算超出当前模型合法范围。');
     if (value.tokens > 0 && generation?.maxOutputTokens !== undefined && value.tokens >= generation.maxOutputTokens) throw new Error('思维预算必须小于最大输出 Token。');

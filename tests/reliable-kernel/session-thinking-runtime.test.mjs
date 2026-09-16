@@ -118,6 +118,24 @@ test('review P1-1真实authority无覆盖Astra冻结raw body仍经过适配器�
   });
 });
 
+test('review P2-4非法Claude覆盖只拒绝本次保存，原会话仍按默认发送', async () => {
+  await fixture(async f => {
+    const claude = { ...f.provider, provider: 'claude', model: 'claude-sonnet-4-5', models: [{ id: 'claude-sonnet-4-5', name: 'Claude' }], generationConfig: { maxOutputTokens: 8192, temperature: 0.7 } };
+    await f.save('llmProviderConfigs', { configs: [claude] });
+    const selection = { scopeKind: 'conversation', scopeId: 'parent', providerConfigId: claude.id, provider: claude.provider, model: claude.model };
+    await assert.rejects(f.configuration.mutations.setModelProfile({ ...selection, thinkingOverride: { kind: 'claude-budget', tokens: 2048 } }), /采样/);
+    await f.configuration.mutations.setModelProfile({ ...selection, thinkingOverride: null });
+    assert.equal((await f.app.agentLoop.runInput(f.input('claude-after-rejected-save'))).terminalStatus, 'completed');
+    assert.equal(f.wires[0].body.temperature, 0.7);
+    assert.equal(f.wires[0].body.thinking, undefined);
+    await f.save('llmProviderConfigs', { configs: [{ ...claude, generationConfig: { maxOutputTokens: 8192, topP: .95 } }] });
+    await f.configuration.mutations.setModelProfile({ ...selection, thinkingOverride: { kind: 'claude-budget', tokens: 2048 } });
+    assert.equal((await f.app.agentLoop.runInput(f.input('claude-legal-sampling'))).terminalStatus, 'completed');
+    assert.equal(f.wires[1].body.top_p, .95);
+    assert.equal(f.wires[1].body.thinking.budget_tokens, 2048);
+  });
+});
+
 test('子 Agent 自有另一渠道和协议优先，父 OpenAI effort 不写入子 Gemini wire', async () => {
   await fixture(async f => {
     const childProvider = { ...f.provider, id: 'child-gemini', provider: 'gemini', model: 'gemini-2.5-flash', models: [{ id: 'gemini-2.5-flash', name: 'synthetic Gemini' }], generationConfig: { maxOutputTokens: 8192, thinkingConfig: { thinkingBudget: 2048 } } };
