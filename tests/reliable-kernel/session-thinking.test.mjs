@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
-const { sessionThinkingCapability: capability, validateSessionThinkingOverride: validate, applySessionThinkingOverride: apply, thinkingValueLabel } = require('../../dist/extension/shared/sessionThinking.js');
+const { sessionThinkingDisplayLabel, sessionThinkingCapability: capability, validateSessionThinkingOverride: validate, applySessionThinkingOverride: apply, thinkingValueLabel } = require('../../dist/extension/shared/sessionThinking.js');
 const { hasThinkingBodyConflict } = require('../../dist/extension/shared/sessionThinkingBody.js');
 const { dryRunLlmProvider } = require('../../dist/extension/backend/capabilities/llmProvider.js');
 const { LlmCapabilityFullRequestAdapter } = require('../../dist/extension/backend/reliableKernel/llmCapabilityProviderAdapter.js');
@@ -31,6 +31,17 @@ export async function ordinaryWire(provider, model, generationConfig, transport 
   assert.equal(result.body.test_later_setting, undefined);
   return result.body;
 }
+
+test('默认展示区分服务默认和既有 adapter 映射，不虚构预算', async () => {
+  assert.equal(sessionThinkingDisplayLabel('gemini', 'gemini-3.1-pro'), '服务默认（适配器：high）');
+  const gemini = await ordinaryWire('gemini', 'gemini-3.1-pro', { thinkingConfig: { thinkingBudget: 4096 } });
+  assert.equal(gemini.generationConfig.thinkingConfig.thinkingLevel.toLowerCase(), 'high');
+  assert.equal(gemini.generationConfig.thinkingConfig.thinkingBudget, undefined);
+  assert.equal(sessionThinkingDisplayLabel('gemini', 'gemini-3.1-pro', { thinkingBudget: 4096 }), '渠道配置已适配（适配器：high）');
+  assert.equal(sessionThinkingDisplayLabel('openai-responses', 'gpt-6-astra', { thinkingLevel: 'none' }), 'low（适配器）');
+  const astra = await ordinaryWire('openai-responses', 'gpt-6-astra', { thinkingConfig: { thinkingLevel: 'none' } });
+  assert.equal(astra.reasoning.effort, 'low');
+});
 
 const matrix = [
   ['openai-compatible', 'o3', { kind: 'openai-effort', value: 'high' }, body => assert.equal(body.reasoning_effort, 'high')],

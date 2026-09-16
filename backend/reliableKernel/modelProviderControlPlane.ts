@@ -1,5 +1,5 @@
-import { thinkingValueLabel } from '../../shared/sessionThinking';
-import type { LlmThinkingConfigRecord } from '../../shared/protocol';
+import { sessionThinkingDisplayLabel } from '../../shared/sessionThinking';
+import type { LlmThinkingConfigRecord, LlmProviderKind } from '../../shared/protocol';
 
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
@@ -577,7 +577,7 @@ export class ModelProviderControlPlane {
     const now = this.timestamp();
     const generationModel = isRecord(frozen.document) && isRecord(frozen.document.model) ? frozen.document.model : undefined;
     const initialStats: StreamStats = { attemptSeq: '1', socketGeneration: '0', retryReason: null,
-      ...(!compressionRequest && generationModel?.generationConfig ? { thinkingSelection: `${frozenModelId}: ${generationModel.thinkingControlledByBody ? '由自定义请求体控制' : thinkingValueLabel(generationModel.thinkingConfig as LlmThinkingConfigRecord)}` } : {})
+      ...(!compressionRequest && generationModel?.generationConfig ? { thinkingSelection: `${frozenModelId}: ${generationModel.thinkingControlledByBody ? '由自定义请求体控制' : sessionThinkingDisplayLabel(generationModel.provider as LlmProviderKind, frozenModelId, generationModel.thinkingConfig as LlmThinkingConfigRecord)}` } : {})
     };
     const steps: RepositoryTransactionStep[] = [
       DOMAIN_REPOSITORIES.domain('Turn').assert(turnId, { status: 'active' }),

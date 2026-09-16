@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
 import type { LlmProviderConfigRecord, SessionThinkingOverride } from '@shared/protocol';
-import { applySessionThinkingOverride, sessionThinkingCapability, thinkingValueLabel, validateSessionThinkingOverride } from '@shared/sessionThinking';
+import { applySessionThinkingOverride, sessionThinkingCapability, sessionThinkingDisplayLabel, validateSessionThinkingOverride } from '@shared/sessionThinking';
 import { hasThinkingBodyConflict } from '@shared/sessionThinkingBody';
 import { useModelProfileStore } from '@webview/stores/useModelProfileStore';
 import SettingsDropdown from '@webview/components/settings/global/SettingsDropdown.vue';
@@ -20,7 +20,7 @@ const override = computed(() => {
   return profile?.providerConfigId === props.config.id && profile.model === props.model ? profile.thinkingOverride : undefined;
 });
 const pending = computed(() => store.pendingFor('conversation', props.conversationId));
-const defaultLabel = computed(() => thinkingValueLabel(generation.value?.thinkingConfig));
+const defaultLabel = computed(() => sessionThinkingDisplayLabel(props.config.provider, props.model, generation.value?.thinkingConfig));
 const selected = computed(() => override.value ? 'tokens' in override.value ? String(override.value.tokens) : override.value.value : 'default');
 const options = computed(() => {
   const result = [{ value: 'default', label: `默认：${defaultLabel.value}` }];
@@ -34,7 +34,7 @@ const options = computed(() => {
   }
   return result;
 });
-const summary = computed(() => conflict.value ? '由自定义请求体控制' : thinkingValueLabel(applySessionThinkingOverride(generation.value, override.value).thinkingConfig));
+const summary = computed(() => conflict.value ? '由自定义请求体控制' : sessionThinkingDisplayLabel(props.config.provider, props.model, applySessionThinkingOverride(generation.value, override.value).thinkingConfig));
 function save(value: string): void {
   error.value = '';
   const cap = capability.value;

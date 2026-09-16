@@ -29,6 +29,7 @@ const { createDefaultLlmProviderConfig } = require('../../dist/extension/backend
 const { ReliableChildAgentCoordinator } = require('../../dist/extension/backend/reliableKernel/childAgentCoordinator.js');
 const { readFrozenTurnAuthority } = require('../../dist/extension/backend/reliableKernel/frozenAuthority.js');
 const { dryRunLlmProvider } = require('../../dist/extension/backend/capabilities/llmProvider.js');
+const { applyFrozenModelProviderConfig } = require('../../dist/extension/backend/reliableKernel/llmCapabilityProviderRegistry.js');
 const { LlmEventType } = require('../../dist/extension/backend/world/modules/llm/events.js');
 
 async function fixture(run, hooks = {}) {
@@ -41,6 +42,7 @@ async function fixture(run, hooks = {}) {
     await save('llmProviderConfigs', { configs: [provider] });
     await save('llm', { activeProviderConfigId: provider.id });
     const agent = await configuration.mutations.createAgent({ name: 'synthetic', kind: 'custom' });
+    const childAgent = await configuration.mutations.createAgent({ name: 'synthetic child', kind: 'custom' });
     await configuration.mutations.setToolPolicy({ scopeKind: 'global', allowedTools: ['counter', 'run_agent'], toolConfigs: { run_agent: { config: { maxChildAgentDepth: 3 } } } });
     const set = (conversationId, value) => configuration.mutations.setModelProfile({ scopeKind: 'conversation', scopeId: conversationId, providerConfigId: provider.id, provider: provider.provider, model: provider.model, thinkingOverride: value ? { kind: 'openai-effort', value } : null });
     const authority = new kernel.RootAuthority(() => path.join(root, 'runtime'));
@@ -63,7 +65,8 @@ async function fixture(run, hooks = {}) {
           start(input, emit) { projected = input; emit({ type: LlmEventType.Done, payload: { requestId: input.id } }); }, abort() {}, dispose() {}
         });
         await adapter.sendFullRequest(request, { async onEvent() { return { accepted: true, terminal: true, checkpointed: true }; } });
-        const wire = await dryRunLlmProvider(projected, { settings: { ...provider, baseUrl: 'https://example.invalid/v1', apiKey: '' } });
+        const effective = applyFrozenModelProviderConfig(await configuration.providerConfig(providerId), request.modelId);
+        const wire = await dryRunLlmProvider(projected, { settings: { ...effective, baseUrl: 'https://example.invalid/v1', apiKey: '' } });
         wires.push({ conversationId: request.conversationId, turnId: request.turnId, body: wire.body });
         if (hooks.send) return hooks.send(request, controls, f);
         await controls.onEvent({ kind: 'completed', streamSeq: '1', content: { role: 'model', parts: [{ text: 'done' }] } });
@@ -83,7 +86,7 @@ async function fixture(run, hooks = {}) {
     });
     const list = async (domain, where = {}) => (await app.database.snapshotAll(kernel.DOMAIN_REPOSITORIES.domain(domain).list({ where, orderBy: { column: 'id', direction: 'asc' }, limit: 100 }))).snapshot;
     coordinator = new ReliableChildAgentCoordinator({ database: app.database, ...app.runtime, modelProvider: app.modelProvider, turns: app.turns, agentLoop: app.agentLoop,
-      agents: { async resolve() { return { agentId: agent.id, agentType: 'worker' }; } },
+      agents: { async resolve() { return { agentId: childAgent.id, agentType: 'worker' }; } },
       modelProfiles: { initializeConversation: ({ conversationId, model }) => configuration.mutations.initializeConversationModelProfile({ conversationId, ...model }) }
     });
     const now = new Date().toISOString();
@@ -92,7 +95,7 @@ async function fixture(run, hooks = {}) {
       kernel.DOMAIN_REPOSITORIES.domain('AgentConversationLink').insert({ id: 'parent-agent', conversation_id: 'parent', agent_id: agent.id, role: 'default', created_at: now, updated_at: now })
     ]);
     const input = key => ({ source: { kind: 'command', key }, conversationId: 'parent', leaseOwnerId: 'thinking-owner', hostBootId: app.database.hostBootId, leaseExpiresAt: new Date(Date.now() + 120000).toISOString(), content: 'synthetic input' });
-    f = { app, configuration, coordinator, provider, set, save, input, requests, wires, list, frozen };
+    f = { app, configuration, coordinator, provider, childAgent, set, save, input, requests, wires, list, frozen };
     await run(f);
   } finally {
     if (coordinator) await coordinator.dispose();
@@ -100,6 +103,26 @@ async function fixture(run, hooks = {}) {
     await fs.rm(root, { recursive: true, force: true });
   }
 }
+
+test('子 Agent 自有另一渠道和协议优先，父 OpenAI effort 不写入子 Gemini wire', async () => {
+  await fixture(async f => {
+    const childProvider = { ...f.provider, id: 'child-gemini', provider: 'gemini', model: 'gemini-2.5-flash', models: [{ id: 'gemini-2.5-flash', name: 'synthetic Gemini' }], generationConfig: { maxOutputTokens: 8192, thinkingConfig: { thinkingBudget: 2048 } } };
+    await f.save('llmProviderConfigs', { configs: [f.provider, childProvider] });
+    await f.configuration.mutations.setModelProfile({ scopeKind: 'agent', scopeId: f.childAgent.id, providerConfigId: childProvider.id, provider: childProvider.provider, model: childProvider.model });
+    await f.set('parent', 'high');
+    await f.app.agentLoop.runInput(f.input('cross-provider-child'));
+    await f.coordinator.waitForIdle();
+    const children = f.wires.filter(w => w.conversationId !== 'parent');
+    assert.ok(children.length);
+    for (const child of children) {
+      assert.equal(child.body.generationConfig.thinkingConfig.thinkingBudget, 2048);
+      assert.equal(child.body.reasoning_effort, undefined);
+      assert.equal(child.body.generationConfig.thinkingConfig.thinkingLevel, undefined);
+    }
+  }, { async send(request, controls, f) {
+    await controls.onEvent({ kind: 'completed', streamSeq: '1', content: { role: 'model', parts: f.requests.length === 1 ? [{ id: 'cross-child', functionCall: { name: 'run_agent', args: { prompt: 'synthetic cross-provider task' } } }] : [{ text: 'done' }] } });
+  } });
+});
 
 test('首次/工具新请求/下一用户请求用新覆盖；旧请求 replay 保持原快照', async () => {
   await fixture(async f => {
@@ -122,10 +145,48 @@ test('首次/工具新请求/下一用户请求用新覆盖；旧请求 replay �
   });
 });
 
+test('同一请求瞬时失败自动重试不读取保存后的思维覆盖', async () => {
+  await fixture(async f => {
+    await f.set('parent', 'high');
+    const result = await f.app.agentLoop.runInput(f.input('retry-thinking'));
+    assert.equal(result.terminalStatus, 'completed');
+    assert.equal(f.requests.length, 2);
+    assert.equal(f.requests[0].modelRequestId, f.requests[1].modelRequestId);
+    assert.deepEqual(f.requests[0].settingsSnapshot, f.requests[1].settingsSnapshot);
+    assert.deepEqual(f.wires.map(w => w.body.reasoning_effort), ['high', 'high']);
+  }, { async send(request, controls, f) {
+    if (f.requests.length === 1) {
+      await f.set('parent', 'medium');
+      throw new kernel.ProviderTransientError('temporary_service_error', 'synthetic retry only');
+    }
+    await controls.onEvent({ kind: 'completed', streamSeq: '1', content: { role: 'model', parts: [{ text: 'done' }] } });
+  } });
+});
+
+
 test('实际 coordinator 从父工具创建/嵌套/继续子会话：最终普通 wire 不继承父覆盖', async () => {
   await fixture(async f => {
     await f.set('parent', 'high');
     await f.app.agentLoop.runInput(f.input('delegate'));
+
+test('已排队输入在实际新请求冻结时采用新值，不追改在途请求', async () => {
+  await fixture(async f => {
+    await f.set('parent', 'high');
+    await f.app.agentLoop.runInput(f.input('before-queue'));
+    const admitted = await f.app.turns.admitNextQueued(f.input('queue-owner'));
+    assert.ok(admitted?.turnId);
+    await f.app.agentLoop.drive(admitted.turnId);
+    assert.deepEqual(f.wires.map(w => w.body.reasoning_effort), ['high', 'medium']);
+  }, { async send(request, controls, f) {
+    if (f.requests.length === 1) {
+      const queued = await f.app.turns.input(f.input('queued-input'));
+      assert.equal(queued.admitted, false);
+      await f.set('parent', 'medium');
+    }
+    await controls.onEvent({ kind: 'completed', streamSeq: '1', content: { role: 'model', parts: [{ text: 'done' }] } });
+  } });
+});
+
     await f.coordinator.waitForIdle();
     const childWires = f.wires.filter(w => w.conversationId !== 'parent');
     assert.ok(new Set(childWires.map(w => w.conversationId)).size >= 2, 'child and nested child ran');

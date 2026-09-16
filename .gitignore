@@ -47,6 +47,7 @@ docs/architecture/*
 !/tests/reliable-kernel/configuration-authority.test.mjs
 !/tests/reliable-kernel/global-settings-live-save.test.mjs
 !/tests/reliable-kernel/read-file-slice.test.mjs
+!/tests/reliable-kernel/session-thinking-store.test.cjs
 !/tests/reliable-kernel/session-thinking.test.mjs
 !/tests/reliable-kernel/session-thinking-runtime.test.mjs
 !/tests/reliable-kernel/request-compression-settings.test.mjs

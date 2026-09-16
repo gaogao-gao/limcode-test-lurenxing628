@@ -1,6 +1,6 @@
 import type { LlmGenerationConfigRecord, LlmProviderKind, LlmThinkingConfigRecord, LlmThinkingLevel, SessionThinkingOverride } from './protocol';
 import { isAstraModel } from './openAIResponsesCapabilities';
-import { geminiThinkingCapabilityForModel } from './geminiThinking';
+import { geminiThinkingCapabilityForModel, isGeminiThinkingLevelSupported } from './geminiThinking';
 
 export type SessionThinkingCapability =
   | { kind: 'gemini-budget' | 'claude-budget'; min: number; max: number; automatic?: number; allowZero?: boolean }
@@ -66,3 +66,21 @@ export function thinkingValueLabel(thinking?: LlmThinkingConfigRecord): string {
   if (thinking?.thinkingBudget !== undefined) return thinking.thinkingBudget === -1 ? '自动（-1）' : `${thinking.thinkingBudget} tokens`;
   return '服务默认';
 }
+
+/** Display the existing adapter's mapping without claiming a remote service's defaults. */
+export function sessionThinkingDisplayLabel(provider: LlmProviderKind, model: string, thinking?: LlmThinkingConfigRecord): string {
+  if (provider === 'gemini') {
+    const capability = geminiThinkingCapabilityForModel(model);
+    if (capability.kind === 'thinkingLevel') {
+      if (isGeminiThinkingLevelSupported(capability, thinking?.thinkingLevel)) return thinking!.thinkingLevel!;
+      return `${thinkingValueLabel(thinking) === '服务默认' ? '服务默认' : '渠道配置已适配'}（适配器：${capability.defaultLevel}）`;
+    }
+    if (capability.kind === 'thinkingBudget') return thinkingValueLabel({ thinkingBudget: thinking?.thinkingBudget });
+    if (capability.kind === 'unsupported') return '不支持（不发送）';
+  }
+  if (provider === 'openai-responses' && isAstraModel(model) && ['none', 'minimal'].includes(thinking?.thinkingLevel ?? '')) return 'low（适配器）';
+  if (provider === 'openai-compatible' || provider === 'openai-responses') return thinkingValueLabel({ thinkingLevel: thinking?.thinkingLevel });
+  if (provider === 'deepseek') return thinking?.thinkingLevel && ['none', 'high', 'max'].includes(thinking.thinkingLevel) ? thinking.thinkingLevel : '服务默认';
+  return thinkingValueLabel(thinking);
+}
+
