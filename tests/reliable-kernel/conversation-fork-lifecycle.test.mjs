@@ -28,7 +28,7 @@ async function rows(app, domain, where = {}) {
   }))).snapshot;
 }
 
-async function withForkRuntime(run) {
+async function withForkRuntime(run, { withTool = false } = {}) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'limcode-fork-lifecycle-'));
   const authority = new kernel.RootAuthority(() => path.join(directory, 'runtime'));
   await kernel.initializeEmptyRuntimeRoot(authority);
@@ -44,6 +44,7 @@ async function withForkRuntime(run) {
     const current = await configuration.loadGlobalSettings(section);
     await configuration.saveGlobalSettings(section, settings, current.revision);
   }
+  if (withTool) await configuration.mutations.setToolPolicy({ scopeKind: 'global', allowedTools: ['read'] });
   const agent = await configuration.mutations.createAgent({ name: 'Fork fixture', kind: 'custom' });
   await configuration.mutations.setModelProfile({
     scopeKind: 'conversation', scopeId: 'source', providerConfigId: provider.id,
@@ -71,10 +72,22 @@ async function withForkRuntime(run) {
         return { providerId, async sendFullRequest(request, controls) {
           requests.push(request);
           await controls.onEvent({ kind: 'completed', streamSeq: '1',
-            content: { role: 'model', parts: [{ text: `offline reply ${requests.length}` }] } });
+            content: { role: 'model', parts: withTool && requests.length === 1
+              ? [{ functionCall: { name: 'read', args: { path: 'synthetic-file.txt' } } }]
+              : [{ text: `offline reply ${requests.length}` }] } });
         } };
       } },
-      toolDispatcher: { definitions() { return []; }, async dispatch() { assert.fail('no tools'); } }
+      toolDispatcher: {
+        definitions() { return withTool ? [{ name: 'read', description: 'Synthetic offline probe', parameters: { type: 'object' } }] : []; },
+        async dispatch(input) {
+          assert.equal(withTool, true, 'only the tool fixture may dispatch');
+          const settled = await app.runtime.effects.settleWithoutEffect({
+            source: { kind: 'internal', key: `fixture-read:${input.toolCallId}` },
+            toolCallId: input.toolCallId, status: 'succeeded', detail: { text: 'synthetic tool result' }
+          });
+          return settled.terminal ?? app.runtime.effects.readTerminalResult(input.toolCallId, true);
+        }
+      }
     });
     // Exercise the production fork method without starting VS Code watchers/panels. The database,
     // ownership pins, configuration stores, context writer and agent loop remain real.
@@ -436,6 +449,54 @@ test('direct fork rejects an obsolete selected head before committing a target',
     assert.equal((await rows(h.app, 'MessageRevision', { id: user.expectedRevisionId })).length, 1);
   });
 });
+
+test('completed synchronous tool history stays forkable in both source and target after sharing', async () => {
+  await withForkRuntime(async h => {
+    await h.turn('source', 'use-one-synthetic-tool');
+    const sourceCalls = await rows(h.app, 'ToolCall');
+    assert.equal(sourceCalls.length, 1);
+    const sourceCallId = sourceCalls[0].id;
+    const first = await h.facade.forkConversation(await h.command('source', 'tool-first-fork'));
+    const [sourceCall] = (await rows(h.app, 'ToolCall')).filter(call => call.id === sourceCallId);
+    assert.ok(sourceCall);
+    const [callSource] = await rows(h.app, 'ContextSegmentSource', { source_kind: 'tool_call', source_id: sourceCall.id });
+    assert.equal((await rows(h.app, 'ContextSegmentSource', { segment_id: callSource.segment_id })).length, 4,
+      'the immutable tool segment now has independent source and target pairs');
+    await h.turn(first.conversationId, 'continue-with-shared-tool-history');
+    const second = await h.facade.forkConversation(await h.command(first.conversationId, 'tool-target-fork'));
+    await h.turn(second.conversationId, 'continue-second-tool-fork');
+    const sourceAgain = await h.facade.forkConversation(await h.command('source', 'tool-source-again'));
+    await h.turn(sourceAgain.conversationId, 'continue-source-tool-fork');
+  }, { withTool: true });
+});
+
+for (const fault of ['revision', 'duplicate']) {
+  test(`tool prefix validation still rejects ${fault} provenance inside the same conversation`, async () => {
+    await withForkRuntime(async h => {
+      await h.turn('source', 'validate-synthetic-tool');
+      const rootId = await h.app.context.currentHeadRootId('source');
+      const database = h.app.database;
+      const snapshot = database.snapshot.bind(database);
+      let injected = false;
+      database.snapshot = async (reads, ...rest) => {
+        const result = await snapshot(reads, ...rest);
+        return { ...result, snapshot: result.snapshot.map((value, index) => {
+          if (reads[index].domain !== 'ContextSegmentSource' || !Array.isArray(value)
+            || !value.some(row => row.source_kind === 'tool_model_result')) return value;
+          injected = true;
+          return fault === 'duplicate' ? [...value, value[0]] : value.map(row => row.source_kind === 'tool_model_result'
+            ? { ...row, source_revision: BigInt(row.source_revision) + 1n } : row);
+        }) };
+      };
+      try {
+        await assert.rejects(h.app.context.assertNativeContextClosed(rootId), /source|duplicate|unique/i);
+        assert.equal(injected, true);
+      } finally {
+        database.snapshot = snapshot;
+      }
+    }, { withTool: true });
+  });
+}
 
 for (const suffixCount of [32, 128]) {
   test(`early fork history selection stays linear across ${suffixCount} later roots`, async t => {
