@@ -96,13 +96,55 @@ test('review completion fence waits preflight and settled failure; expiry/inflig
   const original = registry.register('scope:a:first', async () => { await gate; stored = 1; throw new Error('synthetic failure after write'); }).catch(error => error.message);
   await assert.rejects(registry.after('scope:a:first', 1), /在途/);
   assert.equal(stored, 0);
+  const occupied = registry.register('scope:b:second', async () => { await gate; });
+  await assert.rejects(registry.register('scope:a:first', async () => { throw new Error('must not run'); }), /重复/);
+  await assert.rejects(registry.register('scope:c:overflow', async () => { throw new Error('must not run'); }), /处理中/);
+  await assert.rejects(registry.after('scope:c:overflow'), /未知/);
   time = 100;
   await assert.rejects(registry.after('scope:a:first', 1), /在途/, 'pending entries do not expire as settled');
-  release(); await original; await registry.after('scope:a:first');
+  release(); await original; await occupied; await registry.after('scope:a:first');
   assert.equal(stored, 1, 'settled rejection may have written; only subsequent actual read can decide');
   time = 200;
   await assert.rejects(registry.after('scope:a:first'), /未知/);
   await assert.rejects(registry.after('scope:a:unknown'), /未知/);
+});
+
+for (const operation of ['absent-set', 'existing-set', 'clear']) test(`review scope session fence between record/link writes is readable partial commit: ${operation}`, async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'limcode-thinking-partial-'));
+  try {
+    const authority = new VscodeConfigurationAuthority(() => createVscodeStoragePaths(vscode.Uri.file(directory)));
+    const mutation = authority.mutations, capture = mutation.captureModelProfileRoot();
+    const scope = { scopeKind: 'conversation', scopeId: 'partial-scope' };
+    const selection = { providerConfigId: 'synthetic', provider: 'openai-compatible', model: 'o3' };
+    if (operation !== 'absent-set') await mutation.setModelProfile({ ...scope, ...selection });
+    const before = await mutation.readModelProfileScope(capture, scope);
+    let guardCalls = 0, reconnectRead, enteredSecondWrite = false;
+    const fence = () => {
+      if (++guardCalls === 4) {
+        // This is the real second store-write guard, after saveStore(index+record) completed.
+        enteredSecondWrite = true;
+        reconnectRead = mutation.readModelProfileScope(capture, scope);
+        throw new Error('synthetic session changed between stores');
+      }
+    };
+    await assert.rejects(mutation.writeModelProfileScope(capture, { ...scope, ...selection, model: 'o4-mini', operation: 'select', authorityId: capture.authorityId, expectedRevision: before.revision }, operation === 'clear', undefined, fence), /session changed/);
+    assert.equal(enteredSecondWrite, true);
+    const after = await reconnectRead;
+    const catalog = await authority.configurationClientState();
+    assert.ok(catalog.modelProfileScopeLinks.every(link => catalog.modelProfiles.some(profile => profile.id === link.modelProfileId)), 'no dangling link');
+    if (operation === 'existing-set') {
+      assert.equal(after.profile.model, 'o4-mini', 'failure has already changed the linked record');
+      assert.equal(after.link.id, before.link.id);
+      assert.notEqual(after.revision, before.revision);
+    } else {
+      assert.equal(after.profile, undefined); assert.equal(after.link, undefined);
+      assert.equal(catalog.modelProfiles.length, 1, 'unreachable record is retained, never silently compensated/deleted');
+      if (operation === 'absent-set') assert.equal(after.revision, before.revision, 'unpublished record cannot change safe absence');
+    }
+    // An explicit user operation using the actual observation can recover without removing locks.
+    const recovered = await mutation.writeModelProfileScope(capture, { ...scope, ...selection, operation: 'select', authorityId: capture.authorityId, expectedRevision: after.revision }, false);
+    assert.equal(recovered.profile.model, 'o3'); assert.equal(recovered.outcome, 'committed');
+  } finally { await fs.rm(directory, { recursive: true, force: true }); }
 });
 
 test('调试默认设置使用独立设置文件、现有修订检查与当前数据目录，不保存开启状态', async () => {

@@ -96,7 +96,7 @@ async function fixture(run, hooks = {}) {
       kernel.DOMAIN_REPOSITORIES.domain('AgentConversationLink').insert({ id: 'parent-agent', conversation_id: 'parent', agent_id: agent.id, role: 'default', created_at: now, updated_at: now })
     ]);
     const input = key => ({ source: { kind: 'command', key }, conversationId: 'parent', leaseOwnerId: 'thinking-owner', hostBootId: app.database.hostBootId, leaseExpiresAt: new Date(Date.now() + 120000).toISOString(), content: 'synthetic input' });
-    f = { app, configuration, coordinator, provider, childAgent, set, save, input, requests, wires, list, frozen };
+    f = { app, configuration, coordinator, provider, agent, childAgent, set, save, input, requests, wires, list, frozen };
     await run(f);
   } finally {
     if (coordinator) await coordinator.dispose();
@@ -104,6 +104,105 @@ async function fixture(run, hooks = {}) {
     await fs.rm(root, { recursive: true, force: true });
   }
 }
+
+function scopeRouter(f, onMessage = () => {}) {
+  const { VscodeReliableKernelCommandRouter } = require('../../dist/extension/backend/application/reliableKernel/VscodeReliableKernelCommandRouter.js');
+  const T = require('../../dist/extension/shared/protocol.js').BridgeMessageType;
+  const messages = [], webviews = new Map();
+  const product = { configuration: f.configuration, application: f.app, debugCapture: { setListener() {} }, toolHost: { setStateChangeListener() {}, definitionRecords() { return []; }, mcp: { sourceRecords() { return []; } }, skillDefinitions() { return []; }, ruleFiles() { return []; } } };
+  const router = new VscodeReliableKernelCommandRouter(product);
+  return { router, T, messages,
+    send(id, type, payload, client = 'scope-client') {
+      if (!webviews.has(client)) webviews.set(client, { async postMessage(message) { messages.push(structuredClone(message)); onMessage(message); return true; } });
+      router.handle(client, webviews.get(client), { id, type, payload });
+    },
+    async receive(id) {
+      const deadline = Date.now() + 8000;
+      while (!messages.some(message => message.correlationId === id)) { if (Date.now() > deadline) throw new Error(`No response: ${id}`); await new Promise(resolve => setTimeout(resolve, 5)); }
+      return messages.find(message => message.correlationId === id).payload;
+    }
+  };
+}
+
+for (const inheritedScope of ['agent', 'workflow']) test(`review scope actual component save to Turn preserves ${inheritedScope} identity, not global fallback`, async () => {
+  await fixture(async f => {
+    const provider = { ...f.provider, id: 'inherited-gemini', provider: 'gemini', model: 'gemini-2.5-flash', models: [{ id: 'gemini-2.5-flash', name: 'Gemini' }], generationConfig: { maxOutputTokens: 8192, thinkingConfig: { thinkingBudget: 1024 } } };
+    await f.save('llmProviderConfigs', { configs: [f.provider, provider] });
+    let scopeId = f.agent.id;
+    if (inheritedScope === 'workflow') {
+      const workflow = await f.configuration.mutations.createWorkflow({ name: 'synthetic thinking workflow', steps: [] });
+      scopeId = workflow.id;
+      await f.configuration.mutations.selectConversationWorkflow({ conversationId: 'parent', scopeKind: 'workflow', workflowId: workflow.id });
+      await f.configuration.mutations.setModelProfile({ scopeKind: 'agent', scopeId: f.agent.id, providerConfigId: f.provider.id, provider: f.provider.provider, model: f.provider.model });
+    }
+    await f.configuration.mutations.setModelProfile({ scopeKind: inheritedScope, scopeId, providerConfigId: provider.id, provider: provider.provider, model: provider.model });
+    let ui;
+    const channel = scopeRouter(f, message => ui.receive(message));
+    ui = require('./session-thinking-ui-fixture.cjs').createThinkingUi(message => channel.send(message.id, message.type, message.payload));
+    try {
+      ui.store.activateScope('conversation', 'parent'); await channel.receive(ui.requests.at(-1).id);
+      const effective = ui.store.effectiveFor('conversation', 'parent');
+      assert.equal(effective.providerConfigId, provider.id); assert.equal(effective.model, provider.model);
+      // The same effective identity is passed by Composer to this production script-setup.
+      const control = ui.control(provider, effective.model);
+      assert.equal(control.defaultLabel.value, '1024 tokens');
+      control.save('2048');
+      await ui.store.awaitSavedForScope('conversation', 'parent');
+      const saved = ui.store.confirmedFor('conversation', 'parent');
+      assert.equal(saved.profile.inheritModel, true);
+      assert.equal(saved.profile.providerConfigId, provider.id);
+      assert.equal(ui.requests.at(-1).payload.operation, 'thinking');
+      assert.equal((await f.app.agentLoop.runInput(f.input(`component-${inheritedScope}`))).terminalStatus, 'completed');
+      assert.equal(f.requests.at(-1).modelId, provider.model);
+      assert.equal(f.wires.at(-1).body.generationConfig.thinkingConfig.thinkingBudget, 2048);
+      assert.equal(f.wires.at(-1).body.reasoning_effort, undefined);
+      control.save('default'); await ui.store.awaitSavedForScope('conversation', 'parent');
+      assert.equal(ui.store.confirmedFor('conversation', 'parent').profile, undefined, 'reset restores inheritance, not pinned global identity');
+      assert.equal((await f.app.agentLoop.runInput(f.input(`component-reset-${inheritedScope}`))).terminalStatus, 'completed');
+      assert.equal(f.requests.at(-1).modelId, provider.model);
+      assert.equal(f.wires.at(-1).body.generationConfig.thinkingConfig.thinkingBudget, 1024);
+    } finally { ui.dispose(); }
+  });
+});
+
+test('review scope session capacity pins in-flight client/scope; idle eviction is unknown and reconnect reads actual state', async () => {
+  await fixture(async f => {
+    const channel = scopeRouter(f), { router, T, send, receive } = channel;
+    const scope = { scopeKind: 'conversation', scopeId: 'parent' };
+    send('cap-initial', T.ModelProfileScopeRead, scope); const initial = await receive('cap-initial');
+    let release; const gate = new Promise(resolve => { release = resolve; });
+    const original = f.configuration.providerConfig.bind(f.configuration);
+    f.configuration.providerConfig = async id => { await gate; return original(id); };
+    const selection = { ...scope, ...initial.effectiveModel, operation: 'thinking', expectedEffectiveModel: initial.effectiveModel, authorityId: initial.authorityId, sessionId: initial.sessionId, expectedRevision: initial.revision, thinkingOverride: { kind: 'openai-effort', value: 'high' } };
+    send('cap-write', T.ModelProfileScopeSet, selection);
+    const sessions = router.modelProfileSessions;
+    const realKey = JSON.stringify(['scope-client', initial.authorityId, scope]);
+    assert.equal(sessions.get(realKey).inFlight, 1);
+    // Bounded capacity seam; no unbounded traffic or synthetic settings mutations required.
+    for (let index = 0; index < 255; index++) sessions.set(`synthetic-idle-${index}`, { id: `idle-${index}`, inFlight: 0 });
+    send('other-client', T.ModelProfileScopeRead, { scopeKind: 'agent', scopeId: f.agent.id }, 'other-client');
+    assert.equal((await receive('other-client')).outcome, 'observed');
+    assert.equal(sessions.get(realKey).id, initial.sessionId, 'pressure on other window cannot fence pending original');
+    send('ordinary-mount', T.ModelProfileScopeRead, scope);
+    assert.equal((await receive('ordinary-mount')).sessionId, initial.sessionId, 'mount does not renew');
+    release(); assert.equal((await receive('cap-write')).outcome, 'committed');
+    // Simulate capacity occupied by pending entries: rejection is not accepted/settled work.
+    for (const entry of sessions.values()) entry.inFlight++;
+    send('overflow-read', T.ModelProfileScopeRead, { scopeKind: 'agent', scopeId: 'capacity-extra' }, 'extra-client');
+    assert.equal((await receive('overflow-read')).outcome, 'uncertain');
+    assert.equal(sessions.size, 256);
+    for (const entry of sessions.values()) entry.inFlight--;
+    // The oldest real session is now idle and may be evicted; its old token never regains authority.
+    send('evict-idle', T.ModelProfileScopeRead, { scopeKind: 'agent', scopeId: 'capacity-new' }, 'extra-client');
+    await receive('evict-idle'); assert.equal(sessions.has(realKey), false);
+    send('stale-token', T.ModelProfileScopeRead, { ...scope, sessionId: initial.sessionId, authorityId: initial.authorityId });
+    assert.equal((await receive('stale-token')).outcome, 'uncertain');
+    send('capacity-reconnect', T.ModelProfileScopeRead, { ...scope, renewSession: true });
+    const restored = await receive('capacity-reconnect');
+    assert.notEqual(restored.sessionId, initial.sessionId); assert.equal(restored.profile.thinkingOverride.value, 'high');
+  });
+});
+
 
 test('review scope router registers before suspended preflight; after-read waits and explicit session fences late write', async () => {
   await fixture(async f => {
@@ -184,10 +283,15 @@ test('review P2-4非法Claude覆盖只拒绝本次保存，原会话仍按默认
   });
 });
 
-for (const transport of ['http', 'websocket']) for (const nextEffort of [null, 'medium']) test(`review P1-2同Turn普通请求真实authority压缩fresh update不覆盖本次选择 ${transport}/${nextEffort ?? 'default'}`, async () => {
+for (const transport of ['http', 'websocket']) for (const scenario of [
+  { name: 'service-default', nextEffort: null }, { name: 'channel-low', nextEffort: null, defaultEffort: 'low' },
+  { name: 'medium', nextEffort: 'medium' }, { name: 'unchanged-high', nextEffort: 'high' }
+]) test(`review P1-2同Turn普通请求真实authority压缩fresh update不覆盖本次选择 ${transport}/${scenario.name}`, async () => {
+  const { nextEffort, defaultEffort } = scenario;
+  const expectedEffort = nextEffort ?? defaultEffort;
   let setThinking, enableCompression, toolCount = 0;
   await fixture(async f => {
-    const provider = { ...f.provider, provider: 'openai-responses', model: 'gpt-6-astra', models: [{ id: 'gpt-6-astra', name: 'Astra' }], generationConfig: {}, openaiResponsesTransport: transport, nativeResponses: { enabled: true, reasoningUpdates: true, asyncTools: false, steering: false, multiplexing: false } };
+    const provider = { ...f.provider, provider: 'openai-responses', model: 'gpt-6-astra', models: [{ id: 'gpt-6-astra', name: 'Astra' }], generationConfig: { thinkingConfig: { reasoningMode: 'standard', ...(defaultEffort ? { thinkingLevel: defaultEffort } : {}) } }, openaiResponsesTransport: transport, nativeResponses: { enabled: true, reasoningUpdates: true, asyncTools: false, steering: false, multiplexing: false } };
     await f.save('llmProviderConfigs', { configs: [provider] });
     const defaults = require('../../dist/extension/shared/protocol.js').createDefaultLlmCompressionConfig('native synthetic compression');
     const compression = { ...defaults, kind: 'llm_summary', bodyTargetTokens: 4096, llmSummary: { targetTokens: 1024 }, trigger: { mode: 'manual', thresholdUnit: 'tokens', thresholdTokens: 120000 } };
@@ -203,15 +307,29 @@ for (const transport of ['http', 'websocket']) for (const nextEffort of [null, '
     assert.equal((await f.app.agentLoop.runInput(f.input('native-high-reset'))).terminalStatus, 'completed');
     assert.equal((await f.list('CompressionBlock')).length, 1);
     assert.equal(toolCount, 2);
+    const ordinary = f.requests.filter(request => request.recipe.kind === 'reliable-agent-turn');
+    assert.equal(ordinary.length, 4);
+    assert.equal(new Set(ordinary.slice(1).map(request => request.turnId)).size, 1, 'all three ordinary requests share one Turn');
+    assert.equal(new Set(ordinary.slice(1).map(request => request.modelRequestId)).size, 3, 'not a native continuation inside one frozen request');
+    const previous = ordinary.at(-2).recipe;
+    assert.equal(previous.nativeReasoning.effectiveEffort, 'high');
+    assert.ok(previous.nativeReasoning.updates.length > 0, 'compression is preceded by a carried update, not just base high');
+    assert.equal(previous.nativeReasoning.updates.at(-1).effort, 'high');
     const body = f.wires.at(-1).body;
-    assert.equal(body.reasoning?.effort, nextEffort ?? undefined);
+    assert.equal(body.reasoning?.effort, expectedEffort);
+    assert.equal(body.reasoning?.mode, 'standard');
     const updates = body.input.filter(item => item.type === 'configuration_update');
-    if (nextEffort === null) assert.deepEqual(updates, []);
-    else assert.ok(updates.every(item => item.reasoning.effort === nextEffort));
-    const recipe = f.requests.at(-1).recipe;
-    assert.equal(recipe.nativeReasoning.effectiveEffort, nextEffort ?? undefined);
-    assert.deepEqual(recipe.nativeReasoning.pendingConfigurationUpdate, nextEffort ? { effort: nextEffort } : undefined);
-    assert.equal((await f.list('ToolModelResult')).length, 2);
+    if (!expectedEffort) assert.deepEqual(updates, []);
+    else assert.ok(updates.every(item => item.reasoning.effort === expectedEffort));
+    const recipe = ordinary.at(-1).recipe;
+    assert.equal(recipe.nativeReasoning.effectiveEffort, expectedEffort);
+    assert.equal(recipe.nativeReasoning.baseMode, previous.nativeReasoning.baseMode);
+    assert.deepEqual(recipe.nativeResponses, previous.nativeResponses);
+    assert.deepEqual(body.tools, f.wires.at(-2).body.tools);
+    assert.deepEqual(recipe.nativeReasoning.pendingConfigurationUpdate, expectedEffort ? { effort: expectedEffort } : undefined);
+    const calls = await f.list('ToolCall'), results = await f.list('ToolModelResult');
+    assert.equal(results.length, 2); assert.equal(calls.length, 2);
+    assert.deepEqual(results.map(result => result.tool_call_id).sort(), calls.map(call => call.id).sort(), 'each original call settles exactly once');
   }, { async tool() { if (++toolCount === 2) { await setThinking(nextEffort); await enableCompression(); } },
     async send(request, controls, f) {
       const compression = request.recipe.kind === 'reliable-context-compression';

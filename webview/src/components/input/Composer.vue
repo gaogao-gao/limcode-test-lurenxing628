@@ -97,7 +97,8 @@ const draft = computed({
   set: (next: string) => ui.setComposerDraft(next)
 });
 // Interaction 与普通输入是独立控制面：等待 AskUser/Plan 时，用户仍可创建排队 TurnIntent。
-const savingSessionSelection = ref(false);
+const savingSessionSelections = ref<Record<string, boolean>>({});
+const savingSessionSelection = computed(() => savingSessionSelections.value[clientState.currentConversationId] === true);
 const sessionSaveErrors = ref<Record<string, string>>({});
 const latestThinkingSelection = computed(() => {
   const turns = new Set(Object.values(reliableConversation.feed.records.Turn ?? {}).filter((turn) => turn.conversation_id === clientState.currentConversationId).map((turn) => turn.id));
@@ -401,12 +402,12 @@ function onWindowResize(): void {
 async function submit(): Promise<void> {
   const conversationId = clientState.currentConversationId;
   if (conversationInputDisabled.value) return;
-  savingSessionSelection.value = true;
+  savingSessionSelections.value[conversationId] = true;
   delete sessionSaveErrors.value[conversationId];
   try {
     await modelProfileStore.awaitSavedForScope('conversation', conversationId);
   } catch (error) { sessionSaveErrors.value[conversationId] = error instanceof Error ? error.message : String(error); return; }
-  finally { savingSessionSelection.value = false; }
+  finally { delete savingSessionSelections.value[conversationId]; }
   if (clientState.currentConversationId !== conversationId) return;
   const text = draft.value.trim();
   if ((!text && selectedAttachments.value.length === 0) || conversationInputDisabled.value) return;

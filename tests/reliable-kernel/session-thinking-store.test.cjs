@@ -144,3 +144,44 @@ test('显式新root基线保留旧草稿但不跨代提交；晚old ack/Hello/Er
   assert.equal(f.store.confirmedFor('conversation', 'a').authorityId, 'root-b');
   assert.equal(f.requests.filter(r => r.type === protocol.BridgeMessageType.ModelProfileScopeSet).length, 1);
 });
+
+
+function composerSubmit(f) {
+  const source = fs.readFileSync('webview/src/components/input/Composer.vue', 'utf8').match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1];
+  const ast = ts.createSourceFile('Composer.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const names = ['savingSessionSelections', 'savingSessionSelection', 'sessionSaveErrors', 'conversationInputDisabled'];
+  const parts = ast.statements.filter(statement => ts.isFunctionDeclaration(statement) ? statement.name?.text === 'submit'
+    : ts.isVariableStatement(statement) && statement.declarationList.declarations.some(item => names.includes(item.name.getText(ast))));
+  assert.equal(parts.length, 5, 'execute production submit and its actual scoped guard declarations');
+  const code = parts.map(statement => statement.getText(ast)).join('\n') + '\nmodule.exports = { submit, savingSessionSelection, sessionSaveErrors };';
+  const module = { exports: {} }, sent = [];
+  vm.runInNewContext(ts.transpileModule(code, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText, {
+    module, ref: vue.ref, computed: vue.computed, clientState: f.client, modelProfileStore: f.store, props: { disabled: false },
+    currentSubmissionCommandId: vue.ref(), currentSteeringSubmitting: vue.ref(false), draft: vue.ref('synthetic message'), selectedAttachments: vue.ref([]),
+    buildMessageContent: text => ({ text }), ui: { isEditing: false }, nativeSteeringAvailable: vue.ref(false),
+    currentTurnAuthoritySelection: () => ({}), sendMessage: (text, content) => { sent.push({ conversationId: f.client.currentConversationId, text, content }); }
+  });
+  return { ...module.exports, sent };
+}
+
+test('review scope production Composer submit waits only origin conversation; navigation and failure remain visible', async () => {
+  const f = fixture(); f.read('a'); f.read('b');
+  f.client.currentConversationId = 'a'; choose(f, 'a', 'high'); const write = f.requests.at(-1);
+  const composer = composerSubmit(f);
+  const waitingA = composer.submit(); assert.equal(composer.savingSessionSelection.value, true);
+  f.client.currentConversationId = 'b'; assert.equal(composer.savingSessionSelection.value, false);
+  await composer.submit(); assert.equal(composer.sent[0].conversationId, 'b');
+  f.reply(write, { ...snapshot('a', 'high', 3), outcome: 'committed' }); await waitingA;
+  assert.equal(composer.sent.length, 1, 'old await cannot send into new conversation');
+  f.client.currentConversationId = 'a';
+  f.store.setProfileForScope('conversation', 'a', { ...model, model: 'gpt-4o' });
+  const failed = f.requests.at(-1); f.store.rejectPending(failed.id, 'synthetic non-thinking save failed');
+  await composer.submit();
+  assert.match(composer.sessionSaveErrors.value.a, /save failed/);
+  assert.equal(composer.sent.length, 1);
+  assert.equal(f.store.pendingFor('conversation', 'a').profile.model, 'gpt-4o');
+  const template = fs.readFileSync('webview/src/components/input/Composer.vue', 'utf8');
+  assert.match(template, /<ModelProfileSaveStatus v-if="clientState.currentConversationId"/);
+  assert.match(template, /:model="confirmedEffectiveModel.model"/);
+});
+

@@ -99,8 +99,11 @@ interface StoreSpec<TRecord extends { id: string }, TKey extends string> {
 
 /**
  * Settings-root mutation boundary. It never reads or writes Runtime SQLite.
- * A dedicated cross-process lock serializes multi-store record/link updates; record-first set and
- * link-first clear ordering make an interrupted operation leave at most an unreachable record.
+ * A dedicated cross-process lock serializes multi-store record/link updates. Record-first set and
+ * link-first clear never publish a dangling link. A fence between writes can leave an unreachable
+ * record (new set/clear), or an updated record reachable through the existing link (update). This
+ * is an uncertain partial commit, NOT a rollback; the next locked observation returns the actual
+ * pair/absence, including any committed change, without compensating writes.
  */
 export interface ModelProfileRootCapture { paths: StoragePaths; authorityId: string; root: string }
 

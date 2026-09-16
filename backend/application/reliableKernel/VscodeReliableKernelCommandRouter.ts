@@ -69,7 +69,7 @@ export interface VscodeReliableKernelCommandRouterOptions {
 
 /** Normal Webview command route for reliable Runtime mutations. Bounded Feed remains the only data route. */
 export class VscodeReliableKernelCommandRouter {
-  private readonly modelProfileSessions = new Map<string, string>();
+  private readonly modelProfileSessions = new Map<string, { id: string; inFlight: number }>();
   private readonly modelProfileCompletions = new ModelProfileMutationCompletions();
   private configurationMutationQueue: Promise<void> = Promise.resolve();
   private readonly clientIdByWebview = new WeakMap<vscode.Webview, string>();
@@ -645,15 +645,27 @@ export class VscodeReliableKernelCommandRouter {
       authorityId = capture.authorityId;
       const scope = { scopeKind: input.scopeKind, ...(input.scopeId ? { scopeId: input.scopeId } : {}) };
       const sessionKey = JSON.stringify([clientId, capture.authorityId, scope]);
+      let session = this.modelProfileSessions.get(sessionKey);
       if (message.type === BridgeMessageType.ModelProfileScopeRead && (input.renewSession || !input.sessionId)) {
-        sessionId = randomUUID();
-        this.modelProfileSessions.set(sessionKey, sessionId);
-        if (this.modelProfileSessions.size > 256) this.modelProfileSessions.delete(this.modelProfileSessions.keys().next().value!);
-      } else if (!sessionId || this.modelProfileSessions.get(sessionKey) !== sessionId) {
+        if (!session) {
+          // Never evict another client/scope's executing read or write. Evicted idle tokens fail
+          // closed; explicit reconnect must re-read under the settings mutation lock.
+          if (this.modelProfileSessions.size >= 256) {
+            const idle = [...this.modelProfileSessions].find(([, entry]) => entry.inFlight === 0);
+            if (idle) this.modelProfileSessions.delete(idle[0]);
+            else throw new Error('ModelProfile 编辑会话容量已满且操作仍在途；结果未确定，请稍后显式重新连接。');
+          }
+          session = { id: randomUUID(), inFlight: 0 };
+          this.modelProfileSessions.set(sessionKey, session);
+        } else if (input.renewSession) session.id = randomUUID();
+        // Ordinary mount/read without a token reuses the session; only explicit renew fences it.
+        sessionId = session.id;
+      } else if (!sessionId || session?.id !== sessionId) {
         throw new Error('ModelProfile 编辑会话已失效；请显式连接当前配置根，旧草稿不会自动提交。');
       }
+      const activeSession = session!;
       const fence = () => {
-        if (this.modelProfileSessions.get(sessionKey) !== sessionId) throw new Error('ModelProfile 编辑会话已更换；旧操作不得继续写入。');
+        if (this.modelProfileSessions.get(sessionKey)?.id !== sessionId) throw new Error('ModelProfile 编辑会话已更换；旧操作不得继续写入。');
       };
       const effective = async () => {
         if (scope.scopeKind !== 'conversation' || !scope.scopeId) return undefined;
@@ -662,12 +674,13 @@ export class VscodeReliableKernelCommandRouter {
         return this.product.configuration.effectiveConversationModel(scope.scopeId, requireText(links[0].agent_id, 'agentId'));
       };
       const key = (requestId: string) => modelProfileCompletionKey(clientId, capture.authorityId, scope.scopeKind, scope.scopeId, requestId);
+      activeSession.inFlight++;
       if (message.type === BridgeMessageType.ModelProfileScopeRead) {
         void (async () => {
           if (input.afterRequestId) await this.modelProfileCompletions.after(key(input.afterRequestId));
           const result = await mutation.readModelProfileScope(capture, input, effective, fence);
           reply({ ...result, ...(input.afterRequestId ? { afterRequestId: input.afterRequestId } : {}) });
-        })().catch(failed);
+        })().catch(failed).finally(() => { activeSession.inFlight--; });
         return;
       }
       const operation = this.modelProfileCompletions.register(key(requireText(message.id, 'requestId')), async () => {
@@ -685,7 +698,7 @@ export class VscodeReliableKernelCommandRouter {
       void operation.then(result => {
         reply(result);
         void this.broadcastConfigurationSnapshot(webview).catch(error => console.warn('[LimCode] ModelProfile invalidation failed.', error));
-      }, failed);
+      }, failed).finally(() => { activeSession.inFlight--; });
     } catch (error) { failed(error); }
   }
 
