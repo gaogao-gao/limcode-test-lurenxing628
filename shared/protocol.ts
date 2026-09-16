@@ -79,6 +79,8 @@ export enum BridgeMessageType {
   SystemPromptScopeClear = 'systemPrompt.scope.clear',
   RuntimeContextScopeSet = 'runtimeContext.scope.set',
   RuntimeContextScopeClear = 'runtimeContext.scope.clear',
+  ModelProfileScopeRead = 'modelProfile.scope.read',
+  ModelProfileScopeSnapshot = 'modelProfile.scope.snapshot',
   ModelProfileScopeSet = 'modelProfile.scope.set',
   ModelProfileScopeClear = 'modelProfile.scope.clear',
   MessageEdit = 'message.edit',
@@ -1173,6 +1175,8 @@ export type SessionThinkingOverride =
   | { kind: 'openai-effort' | 'gemini-level' | 'claude-effort' | 'deepseek-effort'; value: LlmThinkingLevel };
 
 export interface ModelProfileRecord {
+  /** A conversation thinking overlay; never participates in model-identity selection. */
+  inheritModel?: boolean;
   /** Only conversation-scoped profiles may carry this override. Never a child model fallback. */
   thinkingOverride?: SessionThinkingOverride;
   id: string;
@@ -2696,6 +2700,11 @@ export interface RuntimeContextScopeSetPayload {
 }
 export interface RuntimeContextScopeClearPayload { scopeKind: ConfigScopeKind; scopeId?: string }
 export interface ModelProfileScopeSetPayload {
+  /** Required at the external UI boundary; internal child/Fork writers use their own locked APIs. */
+  authorityId?: string;
+  expectedRevision?: string;
+  operation?: 'select' | 'thinking' | 'reset';
+  expectedEffectiveModel?: ChatModelOverrideRecord;
   /** null restores provider/model defaults; omitted on model switches clears the old override. */
   thinkingOverride?: SessionThinkingOverride | null;
   scopeKind: ConfigScopeKind;
@@ -2705,7 +2714,26 @@ export interface ModelProfileScopeSetPayload {
   provider?: LlmProviderKind;
   model: string;
 }
-export interface ModelProfileScopeClearPayload { scopeKind: ConfigScopeKind; scopeId?: string }
+export interface ModelProfileScopeClearPayload { scopeKind: ConfigScopeKind; scopeId?: string; authorityId?: string; expectedRevision?: string }
+export interface ModelProfileScopeReadPayload {
+  scopeKind: ConfigScopeKind;
+  scopeId?: string;
+  authorityId?: string;
+  afterRequestId?: string;
+}
+export interface ModelProfileScopeSnapshotPayload {
+  scopeKind: ConfigScopeKind;
+  scopeId?: string;
+  authorityId: string;
+  sequence: number;
+  revision: string;
+  profile?: ModelProfileRecord;
+  link?: ModelProfileScopeLinkRecord;
+  effectiveModel?: ChatModelOverrideRecord;
+  afterRequestId?: string;
+  outcome: 'observed' | 'committed' | 'uncertain';
+  error?: string;
+}
 export interface ClientResyncPayload {
   streamId?: string;
   conversationId?: string;
@@ -2965,6 +2993,7 @@ export type WebviewToExtensionMessage =
   | BridgeEnvelope<BridgeMessageType.SystemPromptScopeClear, SystemPromptScopeClearPayload>
   | BridgeEnvelope<BridgeMessageType.RuntimeContextScopeSet, RuntimeContextScopeSetPayload>
   | BridgeEnvelope<BridgeMessageType.RuntimeContextScopeClear, RuntimeContextScopeClearPayload>
+  | BridgeEnvelope<BridgeMessageType.ModelProfileScopeRead, ModelProfileScopeReadPayload>
   | BridgeEnvelope<BridgeMessageType.ModelProfileScopeSet, ModelProfileScopeSetPayload>
   | BridgeEnvelope<BridgeMessageType.ModelProfileScopeClear, ModelProfileScopeClearPayload>
   | BridgeEnvelope<BridgeMessageType.MessageEdit, MessageEditPayload>
@@ -3036,6 +3065,7 @@ export type ExtensionToWebviewMessage =
   | BridgeEnvelope<BridgeMessageType.ConversationActionResult, ConversationActionResultPayload>
   | BridgeEnvelope<BridgeMessageType.ConversationForkResult, ConversationForkResultPayload>
   | BridgeEnvelope<BridgeMessageType.CompressionCommandResult, CompressionCommandResultPayload>
+  | BridgeEnvelope<BridgeMessageType.ModelProfileScopeSnapshot, ModelProfileScopeSnapshotPayload>
   | BridgeEnvelope<BridgeMessageType.ConfigurationSnapshot, ConfigurationSnapshotPayload>
   | BridgeEnvelope<BridgeMessageType.LlmProviderModelsSnapshot, LlmProviderModelsSnapshotPayload>
   | BridgeEnvelope<BridgeMessageType.CheckpointGitStatusSnapshot, CheckpointGitStatusSnapshotPayload>

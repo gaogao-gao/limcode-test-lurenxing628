@@ -1,3 +1,6 @@
+import { ModelProfileMutationCompletions, modelProfileCompletionKey } from './ModelProfileMutationCompletions';
+import type { ModelProfileScopeReadPayload, ModelProfileScopeSetPayload, ModelProfileScopeSnapshotPayload } from '../../../shared/protocol';
+
 import { createHash, randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
@@ -66,6 +69,7 @@ export interface VscodeReliableKernelCommandRouterOptions {
 
 /** Normal Webview command route for reliable Runtime mutations. Bounded Feed remains the only data route. */
 export class VscodeReliableKernelCommandRouter {
+  private readonly modelProfileCompletions = new ModelProfileMutationCompletions();
   private configurationMutationQueue: Promise<void> = Promise.resolve();
   private readonly clientIdByWebview = new WeakMap<vscode.Webview, string>();
   private readonly settingsSaveBarrier = new GlobalSettingsSaveBarrier();
@@ -90,6 +94,10 @@ export class VscodeReliableKernelCommandRouter {
     message: WebviewToExtensionMessage
   ): void {
     this.clientIdByWebview.set(webview, clientId);
+    if (message.type === BridgeMessageType.ModelProfileScopeSet || message.type === BridgeMessageType.ModelProfileScopeClear || message.type === BridgeMessageType.ModelProfileScopeRead) {
+      this.handleModelProfileScope(clientId, webview, message);
+      return;
+    }
     void this.dispatch(clientId, webview, message).catch((error) => {
       const text = error instanceof Error ? error.message : String(error);
       console.error('[LimCode] Reliable Webview command failed.', message.type, error);
@@ -625,6 +633,54 @@ export class VscodeReliableKernelCommandRouter {
         this.postRequestError(webview, message.type, `可靠 Runtime 尚不支持该命令：${message.type}`, message.id);
         return;
     }
+  }
+
+  /** ModelProfile-only observation boundary; register completion before provider preflight or claim. */
+  private handleModelProfileScope(clientId: string, webview: vscode.Webview, message: WebviewToExtensionMessage): void {
+    const input = message.payload as ModelProfileScopeReadPayload & Partial<ModelProfileScopeSetPayload>;
+    let authorityId = input?.authorityId ?? '';
+    const reply = (payload: ModelProfileScopeSnapshotPayload): void => this.post(webview, {
+      id: randomUUID(), type: BridgeMessageType.ModelProfileScopeSnapshot, channel: 'state', correlationId: message.id, payload
+    });
+    const failed = (error: unknown): void => reply({ scopeKind: input?.scopeKind, ...(input?.scopeId ? { scopeId: input.scopeId } : {}), authorityId,
+      sequence: 0, revision: '', outcome: 'uncertain', error: error instanceof Error ? error.message : String(error) });
+    try {
+      const mutation = this.product.configuration.mutations;
+      const capture = mutation.captureModelProfileRoot(input.authorityId);
+      authorityId = capture.authorityId;
+      const scope = { scopeKind: input.scopeKind, ...(input.scopeId ? { scopeId: input.scopeId } : {}) };
+      const effective = async () => {
+        if (scope.scopeKind !== 'conversation' || !scope.scopeId) return undefined;
+        const links = await this.list('AgentConversationLink', { conversation_id: scope.scopeId, role: 'default' }, 2);
+        if (links.length !== 1) throw new Error('当前会话没有唯一的有效 Agent。');
+        return this.product.configuration.effectiveConversationModel(scope.scopeId, requireText(links[0].agent_id, 'agentId'));
+      };
+      const key = (requestId: string) => modelProfileCompletionKey(clientId, capture.authorityId, scope.scopeKind, scope.scopeId, requestId);
+      if (message.type === BridgeMessageType.ModelProfileScopeRead) {
+        void (async () => {
+          if (input.afterRequestId) await this.modelProfileCompletions.after(key(input.afterRequestId));
+          const result = await mutation.readModelProfileScope(capture, input, effective);
+          reply({ ...result, ...(input.afterRequestId ? { afterRequestId: input.afterRequestId } : {}) });
+        })().catch(failed);
+        return;
+      }
+      const operation = this.modelProfileCompletions.register(key(requireText(message.id, 'requestId')), async () => {
+        const work = async () => {
+          if (!input.expectedRevision || !input.authorityId) throw new Error('ModelProfile UI 保存必须带已确认 revision/authority；未执行写入。');
+          if (input.providerConfigId) await this.product.configuration.providerConfig(input.providerConfigId);
+          const write = () => mutation.writeModelProfileScope(capture, input as ModelProfileScopeSetPayload, message.type === BridgeMessageType.ModelProfileScopeClear, effective);
+          return scope.scopeKind === 'conversation' && scope.scopeId ? this.runConversationCommand(scope.scopeId, write) : write();
+        };
+        // Registering above is synchronous. The existing configuration queue now includes preflight.
+        const queued = this.configurationMutationQueue.then(work, work);
+        this.configurationMutationQueue = queued.then(() => undefined, () => undefined);
+        return queued;
+      });
+      void operation.then(result => {
+        reply(result);
+        void this.broadcastConfigurationSnapshot(webview).catch(error => console.warn('[LimCode] ModelProfile invalidation failed.', error));
+      }, failed);
+    } catch (error) { failed(error); }
   }
 
   private async postConfigurationSnapshot(webview: vscode.Webview, correlationId?: string): Promise<void> {

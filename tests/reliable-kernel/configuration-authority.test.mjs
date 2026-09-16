@@ -40,6 +40,71 @@ async function saveLatestGlobalSettings(authority, section, settings) {
   return authority.saveGlobalSettings(section, settings, current.revision);
 }
 
+test('review scope CAS protects inheritance, absence, peer writes, reset and root fencing', async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'limcode-thinking-scope-'));
+  let root = path.join(directory, 'first');
+  const getPaths = () => createVscodeStoragePaths(vscode.Uri.file(root));
+  try {
+    const a = new VscodeConfigurationAuthority(getPaths), b = new VscodeConfigurationAuthority(getPaths);
+    const one = { ...createDefaultLlmProviderConfig({ name: 'global' }), id: 'global-o3', provider: 'openai-compatible', model: 'o3', models: [{ id: 'o3', name: 'o3' }], modelConfigs: [] };
+    const two = { ...one, id: 'agent-gemini', provider: 'gemini', model: 'gemini-2.5-flash', models: [{ id: 'gemini-2.5-flash', name: 'Gemini' }], generationConfig: { maxOutputTokens: 8192 } };
+    await saveLatestGlobalSettings(a, 'llmProviderConfigs', { configs: [one, two] });
+    await saveLatestGlobalSettings(a, 'llm', { activeProviderConfigId: one.id });
+    const agent = await a.mutations.createAgent({ name: 'scope agent', kind: 'custom' });
+    const gemini = { providerConfigId: two.id, provider: two.provider, model: two.model };
+    const openai = { providerConfigId: one.id, provider: one.provider, model: one.model };
+    await a.mutations.setModelProfile({ scopeKind: 'agent', scopeId: agent.id, ...gemini });
+    const effective = () => a.effectiveConversationModel('conversation-a', agent.id);
+    const scope = { scopeKind: 'conversation', scopeId: 'conversation-a' };
+    const ca = a.mutations.captureModelProfileRoot(), cb = b.mutations.captureModelProfileRoot();
+    const first = await a.mutations.readModelProfileScope(ca, scope, effective);
+    const peer = await b.mutations.readModelProfileScope(cb, scope, effective);
+    assert.equal(first.profile, undefined); assert.deepEqual(first.effectiveModel, gemini);
+    const mutation = { ...scope, ...gemini, authorityId: ca.authorityId, expectedRevision: first.revision, operation: 'thinking', expectedEffectiveModel: gemini, thinkingOverride: { kind: 'gemini-budget', tokens: 2048 } };
+    const saved = await a.mutations.writeModelProfileScope(ca, mutation, false, effective);
+    assert.equal(saved.profile.inheritModel, true);
+    assert.deepEqual(await effective(), gemini);
+    assert.equal((await a.loadRequestGenerationSettings(gemini, scope.scopeId)).generationConfig.thinkingConfig.thinkingBudget, 2048);
+    await assert.rejects(b.mutations.writeModelProfileScope(cb, { ...mutation, authorityId: cb.authorityId, expectedRevision: peer.revision }, false, effective), /其他窗口/);
+    const other = { scopeKind: 'conversation', scopeId: 'conversation-b' };
+    const otherBefore = await b.mutations.readModelProfileScope(cb, other);
+    await b.mutations.writeModelProfileScope(cb, { ...other, ...openai, authorityId: cb.authorityId, expectedRevision: otherBefore.revision, operation: 'select' }, false);
+    assert.equal((await a.mutations.readModelProfileScope(ca, scope)).revision, saved.revision, 'other scope does not conflict');
+    await a.mutations.setModelProfile({ scopeKind: 'agent', scopeId: agent.id, ...openai });
+    await assert.rejects(a.mutations.writeModelProfileScope(ca, { ...mutation, expectedRevision: saved.revision }, false, effective), /继承模型/);
+    assert.deepEqual(await effective(), openai, 'thinking overlay does not pin the old Gemini model');
+    const reset = await a.mutations.writeModelProfileScope(ca, { ...mutation, expectedRevision: saved.revision, operation: 'reset', expectedEffectiveModel: openai }, false, effective);
+    assert.equal(reset.profile, undefined, 'reset of inherit-only overlay restores true absence');
+    const explicit = await a.mutations.writeModelProfileScope(ca, { ...scope, ...openai, authorityId: ca.authorityId, expectedRevision: reset.revision, operation: 'select' }, false, effective);
+    const resetExplicit = await a.mutations.writeModelProfileScope(ca, { ...scope, ...openai, authorityId: ca.authorityId, expectedRevision: explicit.revision, operation: 'reset', expectedEffectiveModel: openai }, false, effective);
+    assert.equal(resetExplicit.profile.model, one.model, 'reset preserves explicit model selection');
+    await assert.rejects(a.mutations.writeModelProfileScope(ca, { ...scope, ...openai, operation: 'select' }, false), /revision/);
+    root = path.join(directory, 'second');
+    const next = a.mutations.captureModelProfileRoot();
+    await assert.rejects(a.mutations.writeModelProfileScope(ca, { ...mutation, expectedRevision: resetExplicit.revision }, false, effective), /改变/);
+    assert.equal((await a.mutations.readModelProfileScope(next, scope)).profile, undefined, 'old queued write cannot enter new root');
+    a.mutations.retireModelProfileAuthority();
+    assert.throws(() => a.mutations.captureModelProfileRoot(), /已结束/);
+  } finally { await fs.rm(directory, { recursive: true, force: true }); }
+});
+
+test('review completion fence waits preflight and settled failure; expiry/inflight is never cancellation', async () => {
+  const { ModelProfileMutationCompletions } = require('../../dist/extension/backend/application/reliableKernel/ModelProfileMutationCompletions.js');
+  let time = 0, release, stored = 0;
+  const registry = new ModelProfileMutationCompletions(() => time, 2, 10);
+  const gate = new Promise(resolve => { release = resolve; });
+  const original = registry.register('scope:a:first', async () => { await gate; stored = 1; throw new Error('synthetic failure after write'); }).catch(error => error.message);
+  await assert.rejects(registry.after('scope:a:first', 1), /在途/);
+  assert.equal(stored, 0);
+  time = 100;
+  await assert.rejects(registry.after('scope:a:first', 1), /在途/, 'pending entries do not expire as settled');
+  release(); await original; await registry.after('scope:a:first');
+  assert.equal(stored, 1, 'settled rejection may have written; only subsequent actual read can decide');
+  time = 200;
+  await assert.rejects(registry.after('scope:a:first'), /未知/);
+  await assert.rejects(registry.after('scope:a:unknown'), /未知/);
+});
+
 test('调试默认设置使用独立设置文件、现有修订检查与当前数据目录，不保存开启状态', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'limcode-debug-settings-'));
   try {

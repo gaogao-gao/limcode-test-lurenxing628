@@ -20,7 +20,6 @@ const override = computed(() => {
   const profile = store.localProfileFor('conversation', props.conversationId).profile;
   return profile?.providerConfigId === props.config.id && profile.model === props.model ? profile.thinkingOverride : undefined;
 });
-const pending = computed(() => store.pendingFor('conversation', props.conversationId));
 const defaultLabel = computed(() => sessionThinkingDisplayLabel(props.config.provider, props.model, generation.value?.thinkingConfig));
 const selected = computed(() => override.value ? 'tokens' in override.value ? String(override.value.tokens) : override.value.value : 'default');
 const options = computed(() => {
@@ -43,7 +42,7 @@ function save(value: string): void {
   let thinkingOverride: SessionThinkingOverride | null = null;
   try {
     if (value !== 'default' && cap) thinkingOverride = validateSessionThinkingOverride('min' in cap ? { kind: cap.kind, tokens: Number(value) } : { kind: cap.kind, value: value as never }, props.config.provider, props.model, generation.value, requestBody.value);
-    store.setProfileForScope('conversation', props.conversationId, { name: '对话临时 LLM', providerConfigId: props.config.id, provider: props.config.provider, model: props.model, thinkingOverride });
+    store.setThinkingForScope(props.conversationId, { providerConfigId: props.config.id, provider: props.config.provider, model: props.model }, thinkingOverride);
   } catch (caught) { error.value = caught instanceof Error ? caught.message : String(caught); }
 }
 watch(() => [props.conversationId, props.config.id, props.model], () => { input.value = ''; error.value = ''; });
@@ -66,12 +65,7 @@ watch(() => [props.conversationId, props.config.id, props.model], () => { input.
     </template>
     <button v-if="override && (conflict || !capability)" type="button" @click="save('default')">恢复默认</button>
     <span v-if="!capability">未知能力</span>
-    <span v-if="pending && !pending.error" role="status">保存中…</span>
-    <span v-if="error || pending?.error" role="alert">{{ error || pending?.error }}</span>
-    <template v-if="pending?.error">
-      <button type="button" @click="save(selected)">重试</button>
-      <button type="button" @click="store.discardPending('conversation', conversationId)">撤销</button>
-    </template>
+    <span v-if="error" role="alert">{{ error }}</span>
   </div>
 </template>
 

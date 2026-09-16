@@ -157,6 +157,13 @@ export class VscodeConfigurationAuthority implements TurnAuthorityCompiler, Atta
     this.setCurrentWorkspaceFolders(currentWorkspaceFolders);
   }
 
+  /** Same authority resolution as Turn compilation, without starting a Turn or selecting a model. */
+  public async effectiveConversationModel(conversationId: string, executorAgentId: string): Promise<ChatModelOverrideRecord> {
+    const compiled = await this.compile({ conversationId, executorAgentId, turnId: `model-profile-observation:${conversationId}`, intentKind: 'input' });
+    const document = JSON.parse(String(compiled.authoritySnapshot.content));
+    return { providerConfigId: document.model.providerConfigId, provider: document.model.provider, model: document.model.modelId };
+  }
+
   public async compile(request: TurnAuthorityCompilationRequest): Promise<CompiledTurnAuthority> {
     const records = await this.loadRecords();
     const agentId = requireId(request.executorAgentId, 'executorAgentId');
@@ -184,10 +191,11 @@ export class VscodeConfigurationAuthority implements TurnAuthorityCompiler, Atta
     const scopesHighToLow = [...scopesLowToHigh].reverse();
 
     const inheritedModelFallback = request.modelFallback;
+    const selectableModelProfiles = records.modelProfiles.filter(profile => !profile.inheritModel);
     const nonGlobalModelProfile = inheritedModelFallback
       ? resolveScopedRecord(
           records.modelProfileScopeLinks,
-          records.modelProfiles,
+          selectableModelProfiles,
           scopesHighToLow.filter((scope) => scope.scopeKind !== 'global'),
           (link) => link.modelProfileId
         )
@@ -195,7 +203,7 @@ export class VscodeConfigurationAuthority implements TurnAuthorityCompiler, Atta
     const globalModelProfile = inheritedModelFallback
       ? resolveRecordAtScope(
           records.modelProfileScopeLinks,
-          records.modelProfiles,
+          selectableModelProfiles,
           { scopeKind: 'global' },
           (link) => link.modelProfileId
         )
@@ -204,7 +212,7 @@ export class VscodeConfigurationAuthority implements TurnAuthorityCompiler, Atta
       ? nonGlobalModelProfile
       : resolveScopedRecord(
           records.modelProfileScopeLinks,
-          records.modelProfiles,
+          selectableModelProfiles,
           scopesHighToLow,
           (link) => link.modelProfileId
         );
