@@ -42,9 +42,9 @@ export function validateSessionThinkingOverride(value: SessionThinkingOverride, 
   const capability = sessionThinkingCapability(provider, model, generation?.maxOutputTokens);
   if (!value || !capability || value.kind !== capability.kind) throw new Error('当前模型不支持此思维参数，请恢复默认或重新选择。');
   if (provider === 'claude' && ('tokens' in value || value.value !== 'none')) {
-    const temperature = requestBody && Object.hasOwn(requestBody, 'temperature') ? requestBody.temperature : generation?.temperature;
-    const topK = requestBody && Object.hasOwn(requestBody, 'top_k') ? requestBody.top_k : generation?.topK;
-    const topP = requestBody && Object.hasOwn(requestBody, 'top_p') ? requestBody.top_p : generation?.topP;
+    const temperature = requestBody && Object.prototype.hasOwnProperty.call(requestBody, 'temperature') ? requestBody.temperature : generation?.temperature;
+    const topK = requestBody && Object.prototype.hasOwnProperty.call(requestBody, 'top_k') ? requestBody.top_k : generation?.topK;
+    const topP = requestBody && Object.prototype.hasOwnProperty.call(requestBody, 'top_p') ? requestBody.top_p : generation?.topP;
     if ((temperature !== undefined && temperature !== 1) || topK !== undefined || (topP !== undefined && (typeof topP !== 'number' || topP < .95 || topP > 1))) {
       throw new Error('当前 Claude 思维模式与采样参数冲突：temperature 仅可省略或为 1，top_k 必须省略，top_p 仅可省略或在 0.95–1。未修改渠道采样，请先在渠道设置调整或恢复默认。');
     }
