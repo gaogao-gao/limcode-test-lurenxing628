@@ -1,3 +1,6 @@
+import { hasThinkingBodyConflict } from '../../shared/sessionThinkingBody';
+import { validateSessionThinkingOverride } from '../../shared/sessionThinking';
+import { loadLlmProviderConfigsSettings } from '../capabilities/vscodeStorage/llmProviderConfigs';
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import type {
@@ -274,7 +277,19 @@ export class VscodeConfigurationMutations {
   public setModelProfile(payload: ModelProfileScopeSetPayload): Promise<void> {
     const scope = normalizeScope(payload.scopeKind, payload.scopeId);
     const model = requireId(payload.model, 'model');
-    return this.mutate((paths) => this.setScoped(
+    return this.mutate(async (paths) => {
+      let thinkingOverride;
+      if (payload.thinkingOverride != null) {
+        if (scope.scopeKind !== 'conversation') throw new Error('思维覆盖仅限当前对话。');
+        const providers = await loadLlmProviderConfigsSettings(paths);
+        const provider = providers.settings.configs.find((item) => item.id === payload.providerConfigId);
+        if (!provider || provider.provider !== payload.provider || !(provider.model === model || provider.models.some((item) => item.id === model))) throw new Error('思维覆盖的渠道或模型不存在。');
+        const modelConfig = provider.modelConfigs.find((item) => item.modelId === model);
+        if (hasThinkingBodyConflict(provider.provider, modelConfig ? modelConfig.requestBody : provider.requestBody)) throw new Error('自定义请求体控制思维或输出参数；请先在渠道设置中解除冲突。');
+        const generation = modelConfig ? modelConfig.generationConfig : provider.generationConfig;
+        thinkingOverride = validateSessionThinkingOverride(payload.thinkingOverride, provider.provider, model, generation);
+      }
+      return this.setScoped(
       modelProfileStore(paths),
       modelProfileLinkStore(paths),
       scope,
@@ -286,7 +301,8 @@ export class VscodeConfigurationMutations {
           ? { providerConfigId: normalizedOptionalText(payload.providerConfigId) }
           : existing?.providerConfigId ? { providerConfigId: existing.providerConfigId } : {}),
         ...(payload.provider ? { provider: payload.provider } : existing?.provider ? { provider: existing.provider } : {}),
-        model
+        model,
+        ...(thinkingOverride ? { thinkingOverride } : {})
       }),
       (existing, recordId, now) => ({
         id: existing?.id ?? scopeLinkId('model-profile', scope),
@@ -296,7 +312,8 @@ export class VscodeConfigurationMutations {
         createdAt: existing?.createdAt ?? now,
         updatedAt: now
       })
-    ));
+    );
+    });
   }
 
   /**

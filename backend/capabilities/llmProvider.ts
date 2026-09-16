@@ -4297,7 +4297,12 @@ async function resolveRuntimeSettings(
 ): Promise<LlmProviderConfigRecord> {
   const cached = request.invocationId ? resolvedRuntimeSettingsByInvocationId?.get(request.invocationId) : undefined;
   if (cached) return normalizeSettings(cached);
-  return normalizeSettings(await resolveMaybe(options.settings, request));
+  const resolved = normalizeSettings(await resolveMaybe(options.settings, request));
+  // Ordinary requests carry the immutable body alongside generation settings. Keep custom
+  // fields intact, but do not let later channel edits change reasoning during a retry/recovery.
+  return request.settingsSnapshot?.generationConfig && request.settingsSnapshot.requestBody !== undefined
+    ? { ...resolved, requestBody: cloneJsonValue(request.settingsSnapshot.requestBody) }
+    : resolved;
 }
 
 function snapshotFromSettings(settings: LlmProviderConfigRecord, compressionConfig?: LlmCompressionConfigRecord): LlmInvocationSettingsSnapshotRecord {

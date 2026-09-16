@@ -1,3 +1,5 @@
+import { readRequestTurnAuthority } from './requestCompressionSettings';
+
 import {
   buildModelHandleCatalog,
   normalizeModelHandleCatalog,
@@ -424,6 +426,7 @@ export class ReliableAgentLoop {
             turnId, requireId(facts.authority.id, 'AuthoritySnapshot.id')
           );
           let frozenRecipe = await this.freezeOrdinaryRequestRecipe({
+            settingsSnapshotContentObjectId,
             turnId,
             round,
             headRootId: requireId(facts.head.root_id, 'ConversationContextHeadLink.root_id'),
@@ -476,6 +479,7 @@ export class ReliableAgentLoop {
             const nativeRebasePlan = compression.nativeRebase
               ?? planNativeCompressionRebase({ nativeEnabled: true, updates: [] });
             frozenRecipe = await this.freezeOrdinaryRequestRecipe({
+            settingsSnapshotContentObjectId,
               turnId,
               round,
               headRootId: requireId(facts.head.root_id, 'ConversationContextHeadLink.root_id'),
@@ -833,6 +837,7 @@ export class ReliableAgentLoop {
   }
 
   private async freezeOrdinaryRequestRecipe(input: {
+    settingsSnapshotContentObjectId?: string;
     turnId: string;
     round: string;
     headRootId: string;
@@ -918,6 +923,7 @@ export class ReliableAgentLoop {
    * configuration updates. Mode/model/provider changes and compression rebase discard stale updates.
    */
   private async readNativeRecipeFreeze(input: {
+    settingsSnapshotContentObjectId?: string;
     turnId: string;
     round: string;
     authoritySnapshotId: string;
@@ -934,15 +940,16 @@ export class ReliableAgentLoop {
       updates: ReadonlyArray<{ effort: string }>;
       effectiveEffort?: string;
       resetCache?: boolean;
-      forceFullReason?: 'compression';
+      forceFullReason?: 'compression' | 'thinking_defaults_restored';
       pendingConfigurationUpdate?: { effort: string };
     };
   }> {
-    const frozen = await readFrozenTurnAuthority(
+    const frozen = await readRequestTurnAuthority(
       this.database,
       this.contentStore,
       requireId(input.authoritySnapshotId, 'authoritySnapshotId'),
-      requireId(input.turnId, 'turnId')
+      requireId(input.turnId, 'turnId'),
+      input.settingsSnapshotContentObjectId
     );
     const documentModel = asRecord(frozen.document)?.model;
     const modelRecord = asRecord(documentModel);
@@ -980,7 +987,8 @@ export class ReliableAgentLoop {
           requireId(modelRecord?.modelId, 'native model.modelId')
         )
       : undefined;
-    if (previous) {
+    const restoreDefaults = previous !== undefined && configuredEffort === undefined && previous.effectiveEffort !== undefined;
+    if (previous && !restoreDefaults) {
       const appliedUpdates = [
         ...previous.updates,
         ...(previous.pendingConfigurationUpdate ? [previous.pendingConfigurationUpdate] : [])
@@ -1011,6 +1019,7 @@ export class ReliableAgentLoop {
     return {
       nativeResponses: capabilities,
       nativeReasoning: {
+        ...(restoreDefaults ? { resetCache: true, forceFullReason: 'thinking_defaults_restored' as const } : {}),
         ...(baseEffort ? { baseEffort } : {}),
         ...(baseMode ? { baseMode } : {}),
         updates: carriedUpdates,

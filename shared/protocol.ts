@@ -1168,7 +1168,13 @@ export interface RunRuntimeContextSnapshotLinkRecord {
   updatedAt: number;
 }
 
+export type SessionThinkingOverride =
+  | { kind: 'gemini-budget' | 'claude-budget'; tokens: number }
+  | { kind: 'openai-effort' | 'gemini-level' | 'claude-effort' | 'deepseek-effort'; value: LlmThinkingLevel };
+
 export interface ModelProfileRecord {
+  /** Only conversation-scoped profiles may carry this override. Never a child model fallback. */
+  thinkingOverride?: SessionThinkingOverride;
   id: string;
   name: string;
   providerConfigId?: string;
@@ -2690,6 +2696,8 @@ export interface RuntimeContextScopeSetPayload {
 }
 export interface RuntimeContextScopeClearPayload { scopeKind: ConfigScopeKind; scopeId?: string }
 export interface ModelProfileScopeSetPayload {
+  /** null restores provider/model defaults; omitted on model switches clears the old override. */
+  thinkingOverride?: SessionThinkingOverride | null;
   scopeKind: ConfigScopeKind;
   scopeId?: string;
   name?: string;

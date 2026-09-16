@@ -69,6 +69,48 @@ test('调试默认设置使用独立设置文件、现有修订检查与当前�
   }
 });
 
+test('会话思维覆盖持久化、隔离、模型替代、Fork独立及子初始化不复制', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'limcode-session-thinking-'));
+  try {
+    const paths = createVscodeStoragePaths(vscode.Uri.file(root));
+    let authority = new VscodeConfigurationAuthority(() => paths);
+    const provider = { ...createDefaultLlmProviderConfig({ name: 'synthetic' }), id: 'thinking', provider: 'openai-compatible', model: 'o3', models: [{ id: 'o3', name: 'o3' }, { id: 'o4-mini', name: 'o4' }], generationConfig: { thinkingConfig: { thinkingLevel: 'low' } }, modelConfigs: [] };
+    await saveLatestGlobalSettings(authority, 'llmProviderConfigs', { configs: [provider] });
+    await saveLatestGlobalSettings(authority, 'llm', { activeProviderConfigId: provider.id });
+    const selection = { providerConfigId: provider.id, provider: provider.provider, model: 'o3' };
+    const set = (scopeId, value, other = {}) => authority.mutations.setModelProfile({ scopeKind: 'conversation', scopeId, ...selection, thinkingOverride: value ? { kind: 'openai-effort', value } : null, ...other });
+    const thinking = async (id, model = selection) => (await authority.loadRequestGenerationSettings(model, id)).generationConfig.thinkingConfig?.thinkingLevel;
+    await set('parent', 'high');
+    assert.equal(await thinking('parent'), 'high');
+    assert.equal(await thinking('other'), 'low');
+    authority = new VscodeConfigurationAuthority(() => paths);
+    assert.equal(await thinking('parent'), 'high');
+    await authority.mutations.copyConversationConfiguration('parent', 'fork');
+    await set('parent', 'medium');
+    assert.equal(await thinking('fork'), 'high');
+    await authority.mutations.initializeConversationModelProfile({ conversationId: 'child', ...selection });
+    assert.equal(await thinking('child'), 'low');
+    await set('child', 'medium');
+    await authority.mutations.initializeConversationModelProfile({ conversationId: 'child', ...selection });
+    assert.equal(await thinking('child'), 'medium');
+    await authority.mutations.initializeConversationModelProfile({ conversationId: 'nested', ...selection });
+    assert.equal(await thinking('nested'), 'low');
+    await set('parent', null);
+    assert.equal(await thinking('parent'), 'low');
+    await set('parent', 'high');
+    await set('parent', null, { model: 'o4-mini' });
+    assert.equal(await thinking('parent', { ...selection, model: 'o4-mini' }), 'low');
+    await assert.rejects(authority.mutations.setModelProfile({ scopeKind: 'agent', scopeId: 'main', ...selection, thinkingOverride: { kind: 'openai-effort', value: 'high' } }), /仅限/);
+    await saveLatestGlobalSettings(authority, 'llmProviderConfigs', { configs: [{ ...provider, modelConfigs: [{ modelId: 'o3', toolCallFormat: 'function-call', systemPromptPrefix: '' }] }] });
+    assert.equal(await thinking('other'), undefined, 'model-specific empty config does not inherit channel low');
+    await saveLatestGlobalSettings(authority, 'llmProviderConfigs', { configs: [{ ...provider, requestBody: { reasoning_effort: 'low' } }] });
+    await assert.rejects(set('other', 'high'), /自定义请求体/);
+    await set('other', null);
+    assert.equal((await authority.loadRequestGenerationSettings(selection, 'other')).thinkingControlledByBody, true);
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
+
 test('全局 UA 随当前配置根持久化，旧窗口不能覆盖且损坏记录不回退默认值', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'limcode-network-settings-'));
   try {

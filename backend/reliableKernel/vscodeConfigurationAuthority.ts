@@ -1,3 +1,7 @@
+import { hasThinkingBodyConflict } from '../../shared/sessionThinkingBody';
+import { applySessionThinkingOverride, validateSessionThinkingOverride } from '../../shared/sessionThinking';
+import type { RequestGenerationSettings } from './requestCompressionSettings';
+
 import type * as vscode from 'vscode';
 import type {
   AgentRecord,
@@ -954,6 +958,26 @@ export class VscodeConfigurationAuthority implements TurnAuthorityCompiler, Atta
       conversationWorkflowSelections: conversationWorkflowSelections ?? [],
       conversationWorkEnvironmentLinks: conversationWorkEnvironmentLinks ?? []
     };
+  }
+
+  public async loadRequestGenerationSettings(model: ChatModelOverrideRecord, conversationId: string): Promise<RequestGenerationSettings> {
+    const records = await this.loadRecords();
+    const provider = records.providerConfigs.find((item) => item.id === model.providerConfigId);
+    if (!provider || provider.provider !== model.provider || !providerContainsModel(provider, model.model)) throw new Error('当前请求渠道或模型已改变，请重新选择。');
+    // Resolve only this conversation. Agent/workflow/global profiles and parent Turn fallbacks
+    // select model identity, never a parent's session-only override.
+    const profile = resolveRecordAtScope(records.modelProfileScopeLinks, records.modelProfiles,
+      { scopeKind: 'conversation', scopeId: conversationId }, (link) => link.modelProfileId);
+    const modelConfig = provider.modelConfigs.find((item) => item.modelId === model.model);
+    const defaults = modelConfig ? modelConfig.generationConfig : provider.generationConfig;
+    const requestBody = (modelConfig ? modelConfig.requestBody : provider.requestBody) ?? {};
+    const override = profile?.providerConfigId === provider.id && profile.provider === provider.provider && profile.model === model.model
+      ? profile.thinkingOverride : undefined;
+    if (override) {
+      if (hasThinkingBodyConflict(provider.provider, requestBody)) throw new Error('自定义请求体与会话思维覆盖冲突，请恢复默认或修改渠道配置。');
+      validateSessionThinkingOverride(override, provider.provider, model.model, defaults);
+    }
+    return { model: { ...model }, generationConfig: applySessionThinkingOverride(defaults, override), requestBody: clonePlain(requestBody), thinkingControlledByBody: hasThinkingBodyConflict(provider.provider, requestBody) };
   }
 
   public async loadRequestCompressionSettings(
