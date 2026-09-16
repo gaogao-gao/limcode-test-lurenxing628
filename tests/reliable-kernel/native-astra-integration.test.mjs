@@ -84,7 +84,7 @@ async function createSettingsAuthority(directory, provider) {
   const agent = await authority.mutations.createAgent({ name: 'native actual authority', kind: 'custom' });
   await authority.mutations.setToolPolicy({ scopeKind: 'global', allowedTools: ['native_probe'], toolConfigs: { native_probe: { nativeAsync: true, autoApproveExecution: true, autoSubmitResult: true, config: {} } } });
   const { createDefaultLlmCompressionConfig } = require(path.join(compiledRoot, 'shared/protocol.js'));
-  const compression = { ...createDefaultLlmCompressionConfig('synthetic native compression'), kind: 'deterministic_summary', trigger: { mode: 'manual', thresholdUnit: 'tokens', thresholdTokens: 120000 } };
+  const compression = { ...createDefaultLlmCompressionConfig('synthetic native compression'), kind: 'deterministic_summary', bodyTargetTokens: 2048, llmSummary: { targetTokens: 1024 }, trigger: { mode: 'manual', thresholdUnit: 'tokens', thresholdTokens: 120000 } };
   await save('llmCompressionConfigs', { configs: [compression] });
   await save('llmCompression', { defaultConfigId: compression.id, providerBindings: [], modelBindings: [] });
   return { authority, agentId: agent.id, async enableCompression() {
@@ -274,7 +274,7 @@ async function withNativeRuntime(run, { transport = 'websocket', realAuthority =
     function completed(socket, responseId, output) {
       send(socket, { type: 'response.completed', response: {
         id: responseId, status: 'completed', model: configuration.model, output,
-        usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 }
+        usage: { input_tokens: realAuthority ? 50000 : 10, output_tokens: 5, total_tokens: realAuthority ? 50005 : 15 }
       } });
       if (transport === 'http') socket.end('data: [DONE]\n\n');
     }
@@ -314,30 +314,32 @@ async function withNativeRuntime(run, { transport = 'websocket', realAuthority =
 
 for (const transport of ['http', 'websocket']) test(`review P1-2真实authority high恢复默认与auto compression组合 ${transport}`, { timeout: 60000 }, async () => {
   await withNativeRuntime(async h => {
-    await h.setThinking('high');
-    h.releaseTool.resolve();
-    const turn = await h.startTurn('review-native-high', 'synthetic historical evidence '.repeat(18000));
-    const first = await h.until(() => h.frames[0], 'high initial');
     const connection = frame => frame.socket ?? frame.response;
+    // Seed low base, then apply high via a configuration_update so the next native recipe
+    // carries high in updates, rather than using high merely as its initial base effort.
+    for (const [index, effort] of ['low', 'high'].entries()) {
+      await h.setThinking(effort);
+      const seed = await h.startTurn(`review-seed-${index}`, index === 0 ? 'synthetic historical evidence '.repeat(18000) : 'raise effort');
+      const frame = await h.until(() => h.frames[index], `seed ${effort}`);
+      h.created(connection(frame), `review-seed-response-${index}`);
+      h.completed(connection(frame), `review-seed-response-${index}`, [h.text(connection(frame), `review-seed-response-${index}`, 0, 'done')]);
+      assert.equal((await seed.completion).terminalStatus, 'completed');
+    }
+    const turn = await h.startTurn('review-native-carried-high', 'use native probe');
+    const first = await h.until(() => h.frames[2], 'carried high initial');
     h.created(connection(first), 'review-high-1');
     const call = { type: 'function_call', id: 'review-tool-item', call_id: 'review-tool-call', name: 'native_probe', arguments: '{}', async: true, status: 'completed' };
     h.send(connection(first), { type: 'response.output_item.done', response_id: 'review-high-1', output_index: 0, item: call });
-    h.completed(connection(first), 'review-high-1', [call]);
-    const second = await h.until(() => h.frames[1], 'tool continuation');
-    assert.ok(second.body.input.some(item => item.type === 'function_call_output' && item.call_id === call.call_id));
-    h.created(connection(second), 'review-high-2');
-    h.completed(connection(second), 'review-high-2', [h.text(connection(second), 'review-high-2', 0, 'done')]);
-    assert.equal((await turn.completion).terminalStatus, 'completed');
-    assert.equal(h.executions(), 1);
+    await h.until(() => h.executions() === 1, 'pending native tool');
     await h.setThinking(null);
     await h.stored.enableCompression();
-    const before = h.frames.length;
-    const restored = await h.startTurn('review-native-reset', 'continue after reset');
-    const frame = await h.until(() => h.frames[before], 'ordinary after automatic compression');
+    h.completed(connection(first), 'review-high-1', [call]);
+    h.releaseTool.resolve();
+    const frame = await h.until(() => h.frames[3], 'tool continuation after automatic compression');
     // Complete the synthetic request even when its body exposes the bug, so cleanup is bounded.
     h.created(connection(frame), 'review-restored');
     h.completed(connection(frame), 'review-restored', [h.text(connection(frame), 'review-restored', 0, 'done')]);
-    assert.equal((await restored.completion).terminalStatus, 'completed');
+    assert.equal((await turn.completion).terminalStatus, 'completed');
     assert.ok((await rows(h.app, 'CompressionBlock')).length > 0, 'real automatic compression must have executed');
     assert.equal(frame.body.reasoning?.effort, undefined);
     assert.deepEqual(frame.body.input.filter(item => item.type === 'configuration_update'), []);
