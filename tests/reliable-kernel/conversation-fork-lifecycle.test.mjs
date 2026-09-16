@@ -17,6 +17,7 @@ const compiled = path.resolve(process.env.LIMCODE_TEST_EXTENSION_ROOT ?? 'dist/e
 const load = file => require(path.join(compiled, file));
 const kernel = load('backend/reliableKernel/index.js');
 const { VscodeReliableKernelApplicationFacade: Facade } = load('backend/application/reliableKernel/VscodeReliableKernelApplicationFacade.js');
+const { ForkContextCandidateProbe } = load('backend/reliableKernel/conversationForkContext.js');
 const { VscodeConfigurationAuthority } = load('backend/reliableKernel/vscodeConfigurationAuthority.js');
 const { createVscodeStoragePaths } = load('backend/capabilities/vscodeStorage/paths.js');
 const { createDefaultLlmProviderConfig } = load('backend/capabilities/vscodeStorage/llmProviderConfigs.js');
@@ -498,11 +499,22 @@ for (const fault of ['revision', 'duplicate']) {
   });
 }
 
+for (const compressed of [false, true]) {
 for (const suffixCount of [32, 128]) {
-  test(`early fork history selection stays linear across ${suffixCount} later roots`, async t => {
+  test(`early fork history selection stays linear across ${suffixCount} later roots (compressed=${compressed})`, async t => {
     await withForkRuntime(async h => {
-      await h.turn('source', 'scale-boundary');
+      const turn = await h.turn('source', 'scale-boundary');
       const command = await h.command('source', `scale-fork-${suffixCount}`, 'user');
+      if (compressed) {
+        const [authority] = await rows(h.app, 'AuthoritySnapshot', { turn_id: turn.turnId });
+        const rootId = await h.app.context.currentHeadRootId('source');
+        const structure = await h.app.context.materializeStructure(rootId);
+        await h.app.compression.create({
+          conversationId: 'source', headRootId: rootId, authoritySnapshotId: authority.id,
+          compressSegmentCount: structure.records.length, title: 'Scale summary',
+          summary: 'Synthetic compressed history', idempotencyKey: 'scale-compression'
+        });
+      }
       for (let index = 0; index < suffixCount; index += 1) {
         await h.app.context.appendContent({
           conversationId: 'source', segmentKind: 'system',
@@ -513,6 +525,12 @@ for (const suffixCount of [32, 128]) {
       const database = h.app.database;
       const materialize = database.materializeContext.bind(database);
       const snapshot = database.snapshot.bind(database);
+      const mayContain = ForkContextCandidateProbe.prototype.mayContain;
+      let candidateMetrics;
+      ForkContextCandidateProbe.prototype.mayContain = async function (...args) {
+        try { return await mayContain.apply(this, args); }
+        finally { candidateMetrics = this.metrics; }
+      };
       let nodeReads = 0;
       database.snapshot = async (reads, ...rest) => {
         nodeReads += reads.filter(read => read.domain === 'ContextSequenceNode').length;
@@ -532,14 +550,80 @@ for (const suffixCount of [32, 128]) {
       } finally {
         database.materializeContext = materialize;
         database.snapshot = snapshot;
+        ForkContextCandidateProbe.prototype.mayContain = mayContain;
       }
-      t.diagnostic(JSON.stringify({ suffixCount, materializations, materializedRecords, nodeReads, elapsedMs: Math.round(performance.now() - start) }));
+      t.diagnostic(JSON.stringify({ compressed, suffixCount, materializations, materializedRecords, nodeReads, candidateMetrics, elapsedMs: Math.round(performance.now() - start) }));
+      assert.ok(candidateMetrics.nodeReads <= suffixCount + 3, 'candidate probe reads each distinct physical node once');
+      assert.equal(candidateMetrics.cacheStates, candidateMetrics.nodeReads, 'one state per node, not per (node, remaining)');
+      assert.ok(candidateMetrics.windowChecks <= 2 * (suffixCount + 3), 'constant work per semantic window');
+      assert.ok(candidateMetrics.segmentReads <= suffixCount + 3);
       assert.ok(nodeReads <= 4 * (suffixCount + 2), 'shared parent chains must be memoized');
       assert.ok(materializedRecords <= 12 * (suffixCount + 2),
         'history selection must not materialize every growing source root');
     });
   });
 }
+}
+
+test('candidate probe excludes an actual compressed tail ancestor outside its visible window', async () => {
+  await withForkRuntime(async h => {
+    await h.turn('source', 'hidden-boundary');
+    const command = await h.command('source', 'hidden-boundary-fork', 'user');
+    const [source] = await rows(h.app, 'ContextSegmentSource', { source_kind: 'message_revision', source_id: command.expectedRevisionId });
+    const turn = await h.turn('source', 'visible-tail');
+    const [authority] = await rows(h.app, 'AuthoritySnapshot', { turn_id: turn.turnId });
+    await h.app.compression.create({
+      conversationId: 'source', headRootId: await h.app.context.currentHeadRootId('source'),
+      authoritySnapshotId: authority.id, compressSegmentCount: 2, title: 'Hidden boundary',
+      summary: 'Compressed first exchange', idempotencyKey: 'hidden-boundary-compression'
+    });
+    const rootId = await h.app.context.currentHeadRootId('source');
+    const structure = await h.app.context.materializeStructure(rootId);
+    assert.equal(structure.root.tail_segment_count, 2n);
+    assert.equal(structure.records.length, 3);
+    assert.ok(!structure.records.some(record => record.segment.id === source.segment_id));
+    const physical = [];
+    let cursor = structure.root.tail_node_id;
+    while (cursor !== null) {
+      const [node] = await rows(h.app, 'ContextSequenceNode', { id: cursor });
+      physical.push(node.segment_id);
+      cursor = node.parent_node_id;
+    }
+    assert.ok(physical.indexOf(source.segment_id) >= Number(structure.root.tail_segment_count),
+      'fixture must actually cross the compressed tail truncation, not use an unrelated chain');
+    const targets = new Set([source.segment_id]);
+    const hidden = new ForkContextCandidateProbe(h.app.database, targets);
+    targets.clear();
+    targets.add(physical[0]);
+    assert.equal(await hidden.mayContain(structure.root), false, 'target set is fixed per probe, and hidden ancestry is not visible');
+    assert.equal(await new ForkContextCandidateProbe(h.app.database, targets).mayContain(structure.root), true);
+    const target = await h.facade.forkConversation(command);
+    await h.turn(target.conversationId, 'after-hidden-boundary-fork');
+  });
+});
+
+test('candidate probe rejects missing nodes, cycles and malformed windows instead of negative-caching them', async () => {
+  const ordinary = { root_node_id: 'tip', tail_node_id: null, segment_count: 1n, tail_segment_count: 0n };
+  const makeProbe = nodes => new ForkContextCandidateProbe({
+    async snapshot(reads) {
+      return { snapshot: reads.map(read => read.domain === 'ContextSequenceNode'
+        ? nodes.get(read.id) ?? null : { segment_kind: read.id === 'summary' ? 'compression' : 'system' }) };
+    }
+  }, new Set(['not-present']));
+  const valid = new Map([['tip', { segment_id: 'suffix', parent_node_id: null }]]);
+  await assert.rejects(makeProbe(new Map()).mayContain(ordinary), /missing/);
+  await assert.rejects(makeProbe(new Map([['tip', { segment_id: 'suffix', parent_node_id: 'tip' }]])).mayContain(ordinary), /cycle/);
+  for (const count of [-1n, 0n, 2n, 1, BigInt(Number.MAX_SAFE_INTEGER) + 1n]) {
+    await assert.rejects(makeProbe(valid).mayContain({ ...ordinary, segment_count: count }), /count|chain/);
+  }
+  const compressed = new Map([...valid, ['summary-node', { segment_id: 'summary', parent_node_id: null }]]);
+  await assert.rejects(makeProbe(compressed).mayContain({ ...ordinary,
+    root_node_id: 'summary-node', tail_node_id: 'tip', tail_segment_count: 2n, segment_count: 3n
+  }), /chain\/count/);
+  await assert.rejects(makeProbe(compressed).mayContain({ ...ordinary,
+    root_node_id: 'summary-node', tail_node_id: 'tip', tail_segment_count: 1n, segment_count: 3n
+  }), /window/);
+});
 
 function createVscodeStub() {
   class Uri {
