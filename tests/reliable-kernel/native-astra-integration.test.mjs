@@ -82,7 +82,7 @@ async function createSettingsAuthority(directory, provider) {
   await save('llmProviderConfigs', { configs: [provider] });
   await save('llm', { activeProviderConfigId: provider.id });
   const agent = await authority.mutations.createAgent({ name: 'native actual authority', kind: 'custom' });
-  await authority.mutations.setToolPolicy({ scopeKind: 'global', allowedTools: ['native_probe'], toolConfigs: { native_probe: { nativeAsync: true, autoApproveExecution: true, autoSubmitResult: true, config: {} } } });
+  await authority.mutations.setToolPolicy({ scopeKind: 'global', allowedTools: ['native_probe'], toolConfigs: { native_probe: { nativeAsync: false, autoApproveExecution: true, autoSubmitResult: true, config: {} } } });
   const { createDefaultLlmCompressionConfig } = require(path.join(compiledRoot, 'shared/protocol.js'));
   const compression = { ...createDefaultLlmCompressionConfig('synthetic native compression'), kind: 'deterministic_summary', bodyTargetTokens: 2048, llmSummary: { targetTokens: 1024 }, trigger: { mode: 'manual', thresholdUnit: 'tokens', thresholdTokens: 120000 } };
   await save('llmCompressionConfigs', { configs: [compression] });
@@ -328,24 +328,18 @@ for (const transport of ['http', 'websocket']) test(`review P1-2真实authority 
     const turn = await h.startTurn('review-native-carried-high', 'use native probe');
     const first = await h.until(() => h.frames[2], 'carried high initial');
     h.created(connection(first), 'review-high-1');
-    const call = { type: 'function_call', id: 'review-tool-item', call_id: 'review-tool-call', name: 'native_probe', arguments: '{}', async: true, status: 'completed' };
+    const call = { type: 'function_call', id: 'review-tool-item', call_id: 'review-tool-call', name: 'native_probe', arguments: '{}', async: false, status: 'completed' };
     h.send(connection(first), { type: 'response.output_item.done', response_id: 'review-high-1', output_index: 0, item: call });
-    await h.until(() => h.executions() === 1, 'pending native tool');
+    // A synchronous tool boundary creates another ordinary ModelRequest in this same Turn.
+    // Native async continuation is intentionally NOT used: that is the same frozen request.
     await h.setThinking(null);
     await h.stored.enableCompression();
     h.completed(connection(first), 'review-high-1', [call]);
     h.releaseTool.resolve();
-    const continuation = await h.until(() => h.frames[3], 'same-request native tool continuation');
-    h.created(connection(continuation), 'review-tool-finished');
-    h.completed(connection(continuation), 'review-tool-finished', [h.text(connection(continuation), 'review-tool-finished', 0, 'done')]);
-    assert.equal((await turn.completion).terminalStatus, 'completed');
-    // Native continuation above intentionally belongs to the old frozen ModelRequest. Only a
-    // new request enters the ordinary freeze/compression path and may use the reset selection.
-    const next = await h.startTurn('review-new-request-reset', 'new request after tool completion');
-    const frame = await h.until(() => h.frames[4], 'new ordinary request after automatic compression');
+    const frame = await h.until(() => h.frames[3], 'new ordinary tool request after automatic compression');
     h.created(connection(frame), 'review-restored');
     h.completed(connection(frame), 'review-restored', [h.text(connection(frame), 'review-restored', 0, 'done')]);
-    assert.equal((await next.completion).terminalStatus, 'completed');
+    assert.equal((await turn.completion).terminalStatus, 'completed');
     assert.ok((await rows(h.app, 'CompressionBlock')).length > 0, 'real automatic compression must have executed');
     assert.equal(frame.body.reasoning?.effort, undefined);
     assert.deepEqual(frame.body.input.filter(item => item.type === 'configuration_update'), []);
