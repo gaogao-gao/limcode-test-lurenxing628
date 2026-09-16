@@ -402,7 +402,9 @@ export class VscodeReliableKernelApplicationFacade implements ApplicationFacade 
     let sourceContextEndSegmentId: string | undefined;
     let sourceContextSegmentIds: string[] | undefined;
     const nativeContext = nativeMessageProjection || requiredToolContext.some((tool) => tool.native);
-    for (const root of roots) {
+    // Prefer the newest context containing this boundary: an edit can leave the same assistant
+    // revision in an older root whose preceding user revisions no longer match the transcript.
+    for (const root of [...roots].reverse()) {
       const rootId = requireText(root.id, 'ContextSequenceRoot.id');
       const structure = await this.product.application.context.materializeStructure(rootId);
       const segmentIndexes = new Map(structure.records.map((record, index) => [String(record.segment.id), index]));

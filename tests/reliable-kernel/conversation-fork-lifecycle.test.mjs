@@ -99,14 +99,17 @@ async function withForkRuntime(run) {
       get app() { return app; }, get facade() { return facade; },
       get configuration() { return configuration; }, requests, environmentId,
       async reopen() { await app.close(); await open(); },
-      async turn(conversationId, key) {
+      async turn(conversationId, key, retry) {
         // Match claim-before-open: keep the panel's reference through the whole fake-provider turn.
         await app.database.conversationOwners.retain(conversationId, `fixture-panel:${conversationId}`);
-        const input = await app.turns.input({
-          source: { kind: 'command', key }, conversationId, content: key,
+        const command = {
+          source: { kind: 'command', key }, conversationId,
           leaseOwnerId: 'fork-fixture-owner', hostBootId: app.database.hostBootId,
           leaseExpiresAt: new Date(Date.now() + 120_000).toISOString()
-        });
+        };
+        const input = retry
+          ? await app.turns.retry({ ...command, ...retry })
+          : await app.turns.input({ ...command, content: key });
         const [lease] = await rows(app, 'ExecutionLease', { turn_id: input.turnId });
         assert.ok(lease);
         const result = await kernel.runWithExecutionLeaseFence({
@@ -290,6 +293,189 @@ for (const fault of ['before-commit', 'revision-race']) {
         await h.facade.forkConversation(refreshed);
       }
       assert.equal((await rows(h.app, 'Conversation')).length, 2);
+    });
+  });
+}
+
+for (const deleteFollowing of [false, true]) {
+  test(`fork after editing an old message (truncate=${deleteFollowing}) keeps only usable history`, async () => {
+    await withForkRuntime(async h => {
+      await h.turn('source', 'original-user-input');
+      const original = await h.command('source', 'original-boundary', 'user');
+      await h.turn('source', 'later-user-input');
+      await h.app.turns.edit({
+        source: { kind: 'command', key: `edit-old-${deleteFollowing}` }, conversationId: 'source',
+        messageId: original.messageId, expectedRevisionId: original.expectedRevisionId,
+        content: 'edited-user-input', deleteFollowing
+      });
+      const [current] = await rows(h.app, 'MessageCurrentRevisionLink', { message_id: original.messageId });
+      const fork = await h.facade.forkConversation({
+        ...original, expectedRevisionId: current.revision_id, command: { commandId: `fork-edited-${deleteFollowing}` }
+      });
+      const estimator = new kernel.ReliableContextTokenEstimator(h.app.database, h.app.contentStore);
+      for (const root of await rows(h.app, 'ContextSequenceRoot', { conversation_id: fork.conversationId })) {
+        await estimator.estimateRoot(root.id);
+      }
+      await h.turn(fork.conversationId, 'continued-after-edit-fork');
+      const nested = await h.facade.forkConversation(await h.command(fork.conversationId, 'nested-after-edit'));
+      await h.turn(nested.conversationId, 'nested-after-edit-input');
+      assert.equal((await rows(h.app, 'Conversation')).length, 3);
+      assert.ok((await rows(h.app, 'MessageRevision', { id: original.expectedRevisionId })).length,
+        'filtering target roots must never remove the original source revision');
+    });
+  });
+}
+
+test('forking an unchanged assistant after an earlier user edit selects current transcript context', async () => {
+  await withForkRuntime(async h => {
+    await h.turn('source', 'old-user-question');
+    const user = await h.command('source', 'user-to-edit', 'user');
+    const assistant = await h.command('source', 'assistant-after-edit');
+    await h.app.turns.edit({
+      source: { kind: 'command', key: 'edit-question-only' }, conversationId: 'source',
+      messageId: user.messageId, expectedRevisionId: user.expectedRevisionId,
+      content: 'new-user-question', deleteFollowing: false
+    });
+    const fork = await h.facade.forkConversation(assistant);
+    const [edited] = await rows(h.app, 'MessageCurrentRevisionLink', { message_id: user.messageId });
+    const [editedRevision] = await rows(h.app, 'MessageRevision', { id: edited.revision_id });
+    const [firstMember] = (await rows(h.app, 'MessagePartOfConversation', { conversation_id: fork.conversationId }))
+      .sort((a, b) => Number(a.message_seq - b.message_seq));
+    const [copiedCurrent] = await rows(h.app, 'MessageCurrentRevisionLink', { message_id: firstMember.message_id });
+    const [copiedRevision] = await rows(h.app, 'MessageRevision', { id: copiedCurrent.revision_id });
+    assert.equal(copiedRevision.content_object_id, editedRevision.content_object_id,
+      'the target visible revision must agree with the current content sent to the provider');
+    const estimator = new kernel.ReliableContextTokenEstimator(h.app.database, h.app.contentStore);
+    for (const root of await rows(h.app, 'ContextSequenceRoot', { conversation_id: fork.conversationId })) {
+      await estimator.estimateRoot(root.id);
+    }
+    await h.turn(fork.conversationId, 'continue-edited-question');
+    const context = h.requests.at(-1).context.map(item => item.content).join('\n');
+    assert.match(context, /new-user-question/);
+    assert.doesNotMatch(context, /old-user-question/);
+    const nested = await h.facade.forkConversation(await h.command(fork.conversationId, 'fork-after-edited-question'));
+    await h.turn(nested.conversationId, 'nested-edited-question');
+  });
+});
+
+test('fork after retrying an old turn does not retain the discarded suffix', async () => {
+  await withForkRuntime(async h => {
+    const first = await h.turn('source', 'retry-original-input');
+    const boundary = await h.command('source', 'retry-boundary');
+    await h.turn('source', 'discarded-later-input');
+    await h.turn('source', 'retry-old-turn', {
+      sourceTurnId: first.turnId, target: { kind: 'message', messageId: boundary.messageId },
+      expectedMessageRevisionId: boundary.expectedRevisionId
+    });
+    const fork = await h.facade.forkConversation(await h.command('source', 'fork-after-retry'));
+    const estimator = new kernel.ReliableContextTokenEstimator(h.app.database, h.app.contentStore);
+    for (const root of await rows(h.app, 'ContextSequenceRoot', { conversation_id: fork.conversationId })) {
+      await estimator.estimateRoot(root.id);
+    }
+    await h.turn(fork.conversationId, 'continue-after-retry');
+    assert.doesNotMatch(h.requests.at(-1).context.map(item => item.content).join('\n'), /discarded-later-input/);
+  });
+});
+
+test('nested compression keeps reachable pre-compression fork boundaries usable', async () => {
+  await withForkRuntime(async h => {
+    for (let round = 1; round <= 2; round += 1) {
+      const turn = await h.turn('source', `compressed-input-${round}`);
+      const [authority] = await rows(h.app, 'AuthoritySnapshot', { turn_id: turn.turnId });
+      const rootId = await h.app.context.currentHeadRootId('source');
+      const structure = await h.app.context.materializeStructure(rootId);
+      await h.app.compression.create({
+        conversationId: 'source', headRootId: rootId, authoritySnapshotId: authority.id,
+        compressSegmentCount: structure.records.length, title: `Summary ${round}`,
+        summary: `Offline summary ${round}`, idempotencyKey: `compression-${round}`
+      });
+    }
+    await h.turn('source', 'after-nested-compression');
+    const fork = await h.facade.forkConversation(await h.command('source', 'compressed-fork'));
+    const estimator = new kernel.ReliableContextTokenEstimator(h.app.database, h.app.contentStore);
+    const roots = await rows(h.app, 'ContextSequenceRoot', { conversation_id: fork.conversationId });
+    assert.ok(roots.length > 1, 'do not drop all historical roots to hide provenance errors');
+    for (const root of roots) await estimator.estimateRoot(root.id);
+    await h.turn(fork.conversationId, 'continue-compressed-fork');
+    const [first] = (await rows(h.app, 'MessagePartOfConversation', { conversation_id: fork.conversationId }))
+      .sort((a, b) => Number(a.message_seq - b.message_seq));
+    const [current] = await rows(h.app, 'MessageCurrentRevisionLink', { message_id: first.message_id });
+    const nested = await h.facade.forkConversation({
+      sourceConversationId: fork.conversationId, messageId: first.message_id,
+      expectedRevisionId: current.revision_id, command: { commandId: 'pre-compression-fork' }
+    });
+    await h.turn(nested.conversationId, 'continue-before-compression');
+    assert.match(h.requests.at(-1).context.map(item => item.content).join('\n'), /compressed-input-1/);
+  });
+});
+
+test('direct fork rejects an obsolete selected head before committing a target', async () => {
+  await withForkRuntime(async h => {
+    await h.turn('source', 'old-direct-question');
+    const user = await h.command('source', 'direct-user', 'user');
+    const assistant = await h.command('source', 'direct-assistant');
+    const rootId = await h.app.context.currentHeadRootId('source');
+    const structure = await h.app.context.materializeStructure(rootId);
+    await h.app.turns.edit({
+      source: { kind: 'command', key: 'direct-edit' }, conversationId: 'source',
+      messageId: user.messageId, expectedRevisionId: user.expectedRevisionId,
+      content: 'new-direct-question', deleteFollowing: false
+    });
+    const [agent] = await rows(h.app, 'AgentConversationLink', { conversation_id: 'source', role: 'default' });
+    await assert.rejects(h.app.runtime.conversationFork.fork({
+      idempotencyKey: 'obsolete-direct-fork', reuseKey: 'obsolete-direct-fork',
+      sourceConversationId: 'source', sourceContextRootId: rootId,
+      sourceContextEndSegmentId: structure.records.at(-1).segment.id,
+      sourceMessageRevisionId: assistant.expectedRevisionId,
+      expectedCurrentMessageRevisionId: assistant.expectedRevisionId,
+      targetTitle: 'Rejected obsolete context', targetAgentId: agent.agent_id
+    }), /outside the copied current transcript/);
+    assert.equal((await rows(h.app, 'Conversation')).length, 1);
+    assert.deepEqual(await rows(h.app, 'ConversationBranchLink'), []);
+    assert.deepEqual(await rows(h.app, 'ConversationReuseLink'), []);
+    assert.equal((await rows(h.app, 'MessageRevision', { id: user.expectedRevisionId })).length, 1);
+  });
+});
+
+for (const suffixCount of [32, 128]) {
+  test(`early fork history selection stays linear across ${suffixCount} later roots`, async t => {
+    await withForkRuntime(async h => {
+      await h.turn('source', 'scale-boundary');
+      const command = await h.command('source', `scale-fork-${suffixCount}`, 'user');
+      for (let index = 0; index < suffixCount; index += 1) {
+        await h.app.context.appendContent({
+          conversationId: 'source', segmentKind: 'system',
+          source: { sourceKind: 'system', sourceId: `scale-${index}`, sourceRevision: 0n },
+          content: `synthetic suffix ${index}`, contentType: 'text/plain'
+        });
+      }
+      const database = h.app.database;
+      const materialize = database.materializeContext.bind(database);
+      const snapshot = database.snapshot.bind(database);
+      let nodeReads = 0;
+      database.snapshot = async (reads, ...rest) => {
+        nodeReads += reads.filter(read => read.domain === 'ContextSequenceNode').length;
+        return snapshot(reads, ...rest);
+      };
+      let materializedRecords = 0;
+      let materializations = 0;
+      database.materializeContext = async (...args) => {
+        const result = await materialize(...args);
+        materializations += 1;
+        materializedRecords += result.snapshot.records.length;
+        return result;
+      };
+      const start = performance.now();
+      try {
+        await h.facade.forkConversation(command);
+      } finally {
+        database.materializeContext = materialize;
+        database.snapshot = snapshot;
+      }
+      t.diagnostic(JSON.stringify({ suffixCount, materializations, materializedRecords, nodeReads, elapsedMs: Math.round(performance.now() - start) }));
+      assert.ok(nodeReads <= 4 * (suffixCount + 2), 'shared parent chains must be memoized');
+      assert.ok(materializedRecords <= 12 * (suffixCount + 2),
+        'history selection must not materialize every growing source root');
     });
   });
 }
