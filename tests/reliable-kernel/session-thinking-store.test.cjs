@@ -146,6 +146,20 @@ test('显式新root基线保留旧草稿但不跨代提交；晚old ack/Hello/Er
 });
 
 
+test('review scope after-read of previous request cannot detach newer queued write', async () => {
+  const f = fixture(); f.read('a'); choose(f, 'a', 'high'); const high = f.requests.at(-1);
+  f.store.refreshScope('conversation', 'a'); const readHigh = f.requests.at(-1);
+  choose(f, 'a', 'medium');
+  f.reply(high, { ...snapshot('a', 'high', 3), outcome: 'committed' }); const medium = f.requests.at(-1);
+  assert.equal(medium.payload.thinkingOverride.value, 'medium');
+  const waiting = f.store.awaitSavedForScope('conversation', 'a');
+  f.reply(readHigh, { ...snapshot('a', 'high', 4), afterRequestId: high.id });
+  assert.equal(f.store.pendingFor('conversation', 'a').requestId, medium.id);
+  assert.equal(f.store.pendingFor('conversation', 'a').status, 'saving');
+  f.reply(medium, { ...snapshot('a', 'medium', 5), outcome: 'committed' }); await waiting;
+  assert.equal(f.store.pendingFor('conversation', 'a'), undefined);
+});
+
 function composerSubmit(f) {
   const source = fs.readFileSync('webview/src/components/input/Composer.vue', 'utf8').match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1];
   const ast = ts.createSourceFile('Composer.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);

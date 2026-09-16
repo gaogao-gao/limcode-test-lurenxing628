@@ -674,6 +674,7 @@ export class VscodeReliableKernelCommandRouter {
         return this.product.configuration.effectiveConversationModel(scope.scopeId, requireText(links[0].agent_id, 'agentId'));
       };
       const key = (requestId: string) => modelProfileCompletionKey(clientId, capture.authorityId, scope.scopeKind, scope.scopeId, requestId);
+      const mutationRequestKey = message.type === BridgeMessageType.ModelProfileScopeRead ? undefined : key(requireText(message.id, 'requestId'));
       activeSession.inFlight++;
       if (message.type === BridgeMessageType.ModelProfileScopeRead) {
         void (async () => {
@@ -683,7 +684,7 @@ export class VscodeReliableKernelCommandRouter {
         })().catch(failed).finally(() => { activeSession.inFlight--; });
         return;
       }
-      const operation = this.modelProfileCompletions.register(key(requireText(message.id, 'requestId')), async () => {
+      const operation = this.modelProfileCompletions.register(mutationRequestKey!, async () => {
         const work = async () => {
           if (!input.expectedRevision || !input.authorityId) throw new Error('ModelProfile UI 保存必须带已确认 revision/authority；未执行写入。');
           if (input.providerConfigId) await this.product.configuration.providerConfig(input.providerConfigId);

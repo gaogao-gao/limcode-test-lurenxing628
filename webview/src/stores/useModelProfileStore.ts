@@ -115,6 +115,9 @@ export const useModelProfileStore = defineStore('modelProfile', {
       const isWrite = !!correlationId && pending?.requestId === correlationId;
       if (!isRead && !isWrite) return;
       if (isRead) delete this.reads[key];
+      // An after-read belongs to one submitted operation, not a newer queued selection that
+      // started while the host was reading. It must not detach that newer in-flight request.
+      if (isRead && read.afterRequestId && pending?.requestId !== read.afterRequestId) return;
       if (payload.outcome === 'uncertain' || !payload.revision || !payload.authorityId || !payload.sessionId) {
         this.status = payload.error || '结果未确定，请重新读取。';
         this.scopeErrors[key] = this.status;
