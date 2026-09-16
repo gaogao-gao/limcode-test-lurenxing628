@@ -133,6 +133,7 @@ test('实际 coordinator 从父工具创建/嵌套/继续子会话：最终普�
     const [child] = await f.list('ChildExecution');
     await f.set(child.child_conversation_id, 'medium');
     await f.set('parent', 'high');
+    await f.app.database.conversationOwners.claim(child.child_conversation_id);
     await f.coordinator.inputFromConversation({ commandId: 'continue-child', childExecutionId: child.id, conversationId: child.child_conversation_id, content: 'continue synthetic child' });
     await f.coordinator.waitForIdle();
     assert.equal(f.wires.filter(w => w.conversationId === child.child_conversation_id).at(-1).body.reasoning_effort, 'medium');

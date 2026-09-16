@@ -611,9 +611,15 @@ for (const transport of ['websocket', 'http']) {
           assert.equal(effectiveEffort(body), 'high');
         }
       });
+      harness.configureModel(MODEL, undefined);
+      await respond('restored-service-default', body => {
+        assert.equal(body.reasoning?.effort, undefined, 'old anchored effort must not be reintroduced');
+        assert.deepEqual(updates(body), [], 'old configuration updates must not restore high');
+        assert.equal(body.previous_response_id, undefined, 'restoring omission uses a full rebase');
+      });
       harness.configureModel(MODEL, 'medium');
       await respond('changed-medium', body => {
-        assert.equal(body.reasoning?.effort, baseEffort);
+        assert.equal(body.reasoning?.effort, 'medium', 'new base after restoring defaults');
         assert.equal(effectiveEffort(body), 'medium');
       });
       harness.configureModel('gpt-5.6', 'high');
