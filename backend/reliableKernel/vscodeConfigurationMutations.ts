@@ -198,7 +198,7 @@ export class VscodeConfigurationMutations {
       if (profile) {
         const next = profile;
         await this.setScoped(modelProfileStore(capture.paths), modelProfileLinkStore(capture.paths), scope, link => link.modelProfileId,
-          () => next, (existing, recordId, now) => ({ id: existing?.id ?? scopeLinkId('model-profile', scope), ...scope, modelProfileId: recordId, role: 'active', createdAt: existing?.createdAt ?? now, updatedAt: now }), guard);
+          () => next, (existing, recordId, now) => ({ id: existing?.id ?? scopeLinkId('model-profile', scope), ...scope, modelProfileId: recordId, role: 'active' as const, createdAt: existing?.createdAt ?? now, updatedAt: now }), guard);
       } else {
         await this.clearScoped(modelProfileStore(capture.paths), modelProfileLinkStore(capture.paths), scope, link => link.modelProfileId, guard);
       }
