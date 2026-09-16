@@ -104,6 +104,20 @@ async function fixture(run, hooks = {}) {
   }
 }
 
+test('review P1-1真实authority无覆盖Astra冻结raw body仍经过适配器清洗', async () => {
+  await fixture(async f => {
+    const astra = { ...f.provider, provider: 'openai-responses', model: 'gpt-6-astra', models: [{ id: 'gpt-6-astra', name: 'Astra' }], generationConfig: {}, requestBody: { temperature: 0.7, top_logprobs: 5, include: ['message.output_text.logprobs'], custom_field: 'keep' } };
+    await f.save('llmProviderConfigs', { configs: [astra] });
+    const result = await f.app.agentLoop.runInput(f.input('astra-raw-no-override'));
+    assert.equal(result.terminalStatus, 'completed');
+    const body = f.wires[0].body;
+    assert.equal(body.temperature, undefined);
+    assert.equal(body.top_logprobs, undefined);
+    assert.ok(!body.include?.includes('message.output_text.logprobs'));
+    assert.equal(body.custom_field, 'keep');
+  });
+});
+
 test('子 Agent 自有另一渠道和协议优先，父 OpenAI effort 不写入子 Gemini wire', async () => {
   await fixture(async f => {
     const childProvider = { ...f.provider, id: 'child-gemini', provider: 'gemini', model: 'gemini-2.5-flash', models: [{ id: 'gemini-2.5-flash', name: 'synthetic Gemini' }], generationConfig: { maxOutputTokens: 8192, thinkingConfig: { thinkingBudget: 2048 } } };

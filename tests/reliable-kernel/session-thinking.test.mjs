@@ -93,3 +93,33 @@ test('自定义请求体冲突仅针对思维/输出字段，无关自定义字�
   for (const [provider, body] of [['openai-compatible', { reasoning_effort: 'low' }], ['openai-responses', { reasoning: { effort: 'low' } }], ['claude', { thinking: { budget_tokens: 1024 } }], ['gemini', { generationConfig: { thinkingConfig: { thinkingBudget: 0 } } }], ['deepseek', { thinking: { type: 'disabled' } }]]) assert.equal(hasThinkingBodyConflict(provider, body), true);
   assert.equal(hasThinkingBodyConflict('openai-responses', { metadata: { fixture: true } }), false);
 });
+
+test('review P2-3 GPT-5.1不得开放xhigh，未知小版本不由小数点推能力', () => {
+  for (const model of ['gpt-5.1', 'gpt-5.1-2025-11-13']) {
+    assert.deepEqual(capability('openai-responses', model)?.values, ['none', 'low', 'medium', 'high']);
+    assert.throws(() => validate({ kind: 'openai-effort', value: 'xhigh' }, 'openai-responses', model));
+  }
+  assert.equal(capability('openai-compatible', 'gpt-5.99'), undefined);
+});
+test('review P2-4 Claude预算与采样配置不能同时形成非法wire，也不暗改默认', async () => {
+  const override = { kind: 'claude-budget', tokens: 2048 };
+  for (const sampling of [{ temperature: 0.7 }, { topK: 2 }, { topP: 0.8 }]) {
+    const generation = { maxOutputTokens: 8192, ...sampling };
+    assert.throws(() => validate(override, 'claude', 'claude-sonnet-4-5', generation), /采样|temperature|top/);
+    assert.deepEqual(generation, { maxOutputTokens: 8192, ...sampling });
+  }
+  const generation = { maxOutputTokens: 8192, temperature: 1 };
+  validate(override, 'claude', 'claude-sonnet-4-5', generation);
+  const wire = await ordinaryWire('claude', 'claude-sonnet-4-5', apply(generation, override));
+  assert.equal(wire.temperature, 1);
+  assert.equal(wire.thinking.budget_tokens, 2048);
+});
+test('review P2-5 Gemini只检测会覆盖思维/输出的nested字段', async () => {
+  for (const body of [{ generationConfig: {} }, { generationConfig: { temperature: 0.2 } }]) assert.equal(hasThinkingBodyConflict('gemini', body), false);
+  for (const body of [{ generationConfig: null }, { generationConfig: false }, { generationConfig: { maxOutputTokens: 1 } }, { generationConfig: { thinkingConfig: null } }]) assert.equal(hasThinkingBodyConflict('gemini', body), true);
+  const wire = await ordinaryWire('gemini', 'gemini-2.5-flash', apply({ maxOutputTokens: 8192 }, { kind: 'gemini-budget', tokens: 2048 }), 'http', { generationConfig: { temperature: 0.2 }, custom_field: 'keep' });
+  assert.equal(wire.generationConfig.temperature, 0.2);
+  assert.equal(wire.generationConfig.thinkingConfig.thinkingBudget, 2048);
+  assert.equal(wire.custom_field, 'keep');
+});
+
