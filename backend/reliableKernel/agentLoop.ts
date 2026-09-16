@@ -977,8 +977,12 @@ export class ReliableAgentLoop {
     let baseEffort = configuredEffort;
     let baseMode: 'standard' | 'pro' | undefined = configuredMode;
     let carriedUpdates: ReadonlyArray<{ effort: string }> = [];
+    const compressionRebase = input.nativeRebase?.forceFullReason === 'compression';
+    // Compression records an older request's effective effort. It is not an authority for this
+    // newly frozen request: restore-to-omission clears it, and an explicit new choice replaces it.
     let pendingConfigurationUpdate = capabilities.reasoningUpdates
-      ? input.nativeRebase?.freshConfigurationUpdate
+      && input.nativeRebase?.freshConfigurationUpdate && configuredEffort !== undefined
+      ? { effort: configuredEffort }
       : undefined;
     const previous = capabilities.reasoningUpdates
       ? await this.readLatestNativeReasoning(
@@ -988,7 +992,7 @@ export class ReliableAgentLoop {
         )
       : undefined;
     const restoreDefaults = previous !== undefined && configuredEffort === undefined && previous.effectiveEffort !== undefined;
-    if (previous && !restoreDefaults) {
+    if (previous && !restoreDefaults && !compressionRebase) {
       const appliedUpdates = [
         ...previous.updates,
         ...(previous.pendingConfigurationUpdate ? [previous.pendingConfigurationUpdate] : [])

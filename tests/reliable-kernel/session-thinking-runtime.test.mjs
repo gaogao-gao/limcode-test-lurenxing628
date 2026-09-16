@@ -137,7 +137,7 @@ test('review P2-4非法Claude覆盖只拒绝本次保存，原会话仍按默认
   });
 });
 
-for (const transport of ['http', 'websocket']) test(`review P1-2同Turn普通请求真实authority压缩fresh update不覆盖本次默认 ${transport}`, async () => {
+for (const transport of ['http', 'websocket']) for (const nextEffort of [null, 'medium']) test(`review P1-2同Turn普通请求真实authority压缩fresh update不覆盖本次选择 ${transport}/${nextEffort ?? 'default'}`, async () => {
   let setThinking, enableCompression, toolCount = 0;
   await fixture(async f => {
     const provider = { ...f.provider, provider: 'openai-responses', model: 'gpt-6-astra', models: [{ id: 'gpt-6-astra', name: 'Astra' }], generationConfig: {}, openaiResponsesTransport: transport, nativeResponses: { enabled: true, reasoningUpdates: true, asyncTools: false, steering: false, multiplexing: false } };
@@ -157,13 +157,15 @@ for (const transport of ['http', 'websocket']) test(`review P1-2同Turn普通请
     assert.equal((await f.list('CompressionBlock')).length, 1);
     assert.equal(toolCount, 2);
     const body = f.wires.at(-1).body;
-    assert.equal(body.reasoning?.effort, undefined);
-    assert.deepEqual(body.input.filter(item => item.type === 'configuration_update'), []);
+    assert.equal(body.reasoning?.effort, nextEffort ?? undefined);
+    const updates = body.input.filter(item => item.type === 'configuration_update');
+    if (nextEffort === null) assert.deepEqual(updates, []);
+    else assert.ok(updates.every(item => item.reasoning.effort === nextEffort));
     const recipe = f.requests.at(-1).recipe;
-    assert.equal(recipe.nativeReasoning.effectiveEffort, undefined);
-    assert.equal(recipe.nativeReasoning.pendingConfigurationUpdate, undefined);
+    assert.equal(recipe.nativeReasoning.effectiveEffort, nextEffort ?? undefined);
+    assert.deepEqual(recipe.nativeReasoning.pendingConfigurationUpdate, nextEffort ? { effort: nextEffort } : undefined);
     assert.equal((await f.list('ToolModelResult')).length, 2);
-  }, { async tool() { if (++toolCount === 2) { await setThinking(null); await enableCompression(); } },
+  }, { async tool() { if (++toolCount === 2) { await setThinking(nextEffort); await enableCompression(); } },
     async send(request, controls, f) {
       const compression = request.recipe.kind === 'reliable-context-compression';
       const content = compression ? { type: 'compression_result', contents: [{ role: 'user', parts: [{ text: 'synthetic summary' }] }] }
