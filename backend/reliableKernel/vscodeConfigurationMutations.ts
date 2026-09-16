@@ -278,7 +278,7 @@ export class VscodeConfigurationMutations {
     const scope = normalizeScope(payload.scopeKind, payload.scopeId);
     const model = requireId(payload.model, 'model');
     return this.mutate(async (paths) => {
-      let thinkingOverride;
+      let thinkingOverride: ModelProfileRecord['thinkingOverride'];
       if (payload.thinkingOverride != null) {
         if (scope.scopeKind !== 'conversation') throw new Error('思维覆盖仅限当前对话。');
         const providers = await loadLlmProviderConfigsSettings(paths);

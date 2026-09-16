@@ -1,0 +1,84 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+const { sessionThinkingCapability: capability, validateSessionThinkingOverride: validate, applySessionThinkingOverride: apply, thinkingValueLabel } = require('../../dist/extension/shared/sessionThinking.js');
+const { hasThinkingBodyConflict } = require('../../dist/extension/shared/sessionThinkingBody.js');
+const { dryRunLlmProvider } = require('../../dist/extension/backend/capabilities/llmProvider.js');
+const { LlmCapabilityFullRequestAdapter } = require('../../dist/extension/backend/reliableKernel/llmCapabilityProviderAdapter.js');
+const { LlmEventType } = require('../../dist/extension/backend/world/modules/llm/events.js');
+
+export async function ordinaryWire(provider, model, generationConfig, transport = 'http', body = {}) {
+  let projected;
+  const adapter = new LlmCapabilityFullRequestAdapter('fixture-provider', {
+    start(request, emit) { projected = request; emit({ type: LlmEventType.Done, payload: { requestId: request.id } }); },
+    abort() {}, dispose() {}
+  });
+  await adapter.sendFullRequest({
+    kind: 'full-model-request', modelRequestId: 'thinking-matrix', conversationId: 'fixture-session', attemptSeq: '1', socketGeneration: '1',
+    providerId: 'fixture-provider', modelId: model,
+    authoritySnapshot: { model: { providerConfigId: 'fixture-provider', provider, modelId: model, generationConfig, requestBody: body }, toolPolicy: { allowedTools: [], preset: 'custom', sourceConfigs: {} } },
+    recipe: { tools: [] }, context: [{ segmentId: 'input', segmentKind: 'message', messageRole: 'user', contentType: 'application/vnd.limcode.message+json', content: JSON.stringify({ role: 'user', parts: [{ text: 'synthetic fixture' }] }) }],
+    attachmentCatalogState: { catalog: [], placements: [] }
+  }, { async onEvent() { return { accepted: true, checkpointed: true, terminal: true }; } });
+  assert.deepEqual(projected.settingsSnapshot.generationConfig, generationConfig);
+  const result = await dryRunLlmProvider(projected, { settings: {
+    id: 'fixture-provider', name: 'Synthetic fixture', provider, model, models: [{ id: model, name: model }], modelConfigs: [],
+    baseUrl: 'https://example.invalid/v1', apiKey: '', stream: true, openaiResponsesTransport: transport, toolCallFormat: 'function-call',
+    systemPromptPrefix: '', generationConfig: { thinkingConfig: { thinkingLevel: 'low' } }, requestBody: { test_later_setting: 'must not leak' },
+    createdAt: 1, updatedAt: 1, promptCache: { enabled: false }
+  } });
+  assert.equal(result.body.test_later_setting, undefined);
+  return result.body;
+}
+
+const matrix = [
+  ['openai-compatible', 'o3', { kind: 'openai-effort', value: 'high' }, body => assert.equal(body.reasoning_effort, 'high')],
+  ['openai-responses', 'o3', { kind: 'openai-effort', value: 'high' }, body => assert.equal(body.reasoning.effort, 'high')],
+  ['gemini', 'gemini-2.5-flash', { kind: 'gemini-budget', tokens: 0 }, body => assert.equal(body.generationConfig.thinkingConfig.thinkingBudget, 0)],
+  ['gemini', 'gemini-2.5-pro', { kind: 'gemini-budget', tokens: -1 }, body => assert.equal(body.generationConfig.thinkingConfig.thinkingBudget, -1)],
+  ['gemini', 'gemini-3.1-pro', { kind: 'gemini-level', value: 'medium' }, body => assert.equal(body.generationConfig.thinkingConfig.thinkingLevel.toLowerCase(), 'medium')],
+  ['claude', 'claude-sonnet-4-5', { kind: 'claude-budget', tokens: 2048 }, body => { assert.equal(body.thinking.budget_tokens, 2048); assert.equal(body.thinking.type, 'enabled'); assert.equal(body.output_config, undefined); }],
+  ['claude', 'claude-opus-4-6', { kind: 'claude-effort', value: 'high' }, body => { assert.equal(body.thinking.type, 'adaptive'); assert.equal(body.output_config.effort, 'high'); assert.equal(body.thinking.budget_tokens, undefined); }],
+  ['claude', 'claude-opus-4-6', { kind: 'claude-effort', value: 'none' }, body => assert.equal(body.thinking.type, 'disabled')],
+  ['deepseek', 'deepseek-reasoner', { kind: 'deepseek-effort', value: 'high' }, body => { assert.equal(body.thinking.type, 'enabled'); assert.equal(body.reasoning_effort, 'high'); }]
+];
+for (const [provider, model, override, check] of matrix) test(`普通 adapter → 实际 dry-run body: ${provider}/${model}/${JSON.stringify(override)}`, async () => {
+  const defaults = { maxOutputTokens: 32768 };
+  validate(override, provider, model, defaults);
+  check(await ordinaryWire(provider, model, apply(defaults, override)));
+});
+
+test('Responses HTTP/WS high → 默认省略，快照空对象不能回读实时 low；保留无关 custom body', async () => {
+  for (const transport of ['http', 'websocket']) {
+    const high = await ordinaryWire('openai-responses', 'o3', apply(undefined, { kind: 'openai-effort', value: 'high' }), transport);
+    assert.equal(high.reasoning.effort, 'high');
+    const reset = await ordinaryWire('openai-responses', 'o3', {}, transport, { metadata: { fixture: 'keep' } });
+    assert.equal(reset.reasoning, undefined);
+    assert.deepEqual(reset.metadata, { fixture: 'keep' });
+  }
+});
+
+test('能力负例与特殊值：未知不猜测、格式不等价、合法范围和输出限制', () => {
+  assert.equal(capability('openai-compatible', 'relay-custom-model'), undefined);
+  assert.equal(capability('openai-compatible', 'gpt-4o'), undefined);
+  assert.equal(capability('openai-compatible', 'o1-mini'), undefined);
+  assert.equal(capability('gemini', 'gemini-2.0-flash'), undefined);
+  assert.equal(capability('claude', 'claude-sonnet-4-5'), undefined, 'Claude numeric budget needs an explicit max output');
+  assert.throws(() => validate({ kind: 'gemini-budget', tokens: 0 }, 'gemini', 'gemini-2.5-pro'));
+  assert.throws(() => validate({ kind: 'gemini-budget', tokens: -2 }, 'gemini', 'gemini-2.5-flash'));
+  assert.throws(() => validate({ kind: 'gemini-budget', tokens: 32769 }, 'gemini', 'gemini-2.5-pro'));
+  assert.throws(() => validate({ kind: 'gemini-budget', tokens: 1024 }, 'gemini', 'gemini-2.5-flash', { maxOutputTokens: 1024 }));
+  assert.throws(() => validate({ kind: 'openai-effort', value: 'high' }, 'gemini', 'gemini-3.1-pro'));
+  assert.throws(() => validate({ kind: 'gemini-level', value: 'medium' }, 'gemini', 'gemini-3-pro'));
+  assert.throws(() => validate({ kind: 'claude-budget', tokens: 1023 }, 'claude', 'claude-sonnet-4-5', { maxOutputTokens: 8192 }));
+  assert.equal(thinkingValueLabel(), '服务默认');
+  assert.equal(thinkingValueLabel({ thinkingBudget: 0 }), '0 tokens');
+  assert.equal(thinkingValueLabel({ thinkingLevel: 'none' }), 'none');
+  assert.equal(thinkingValueLabel({ thinkingBudget: -1 }), '自动（-1）');
+});
+
+test('自定义请求体冲突仅针对思维/输出字段，无关自定义字段允许保留', () => {
+  for (const [provider, body] of [['openai-compatible', { reasoning_effort: 'low' }], ['openai-responses', { reasoning: { effort: 'low' } }], ['claude', { thinking: { budget_tokens: 1024 } }], ['gemini', { generationConfig: { thinkingConfig: { thinkingBudget: 0 } } }], ['deepseek', { thinking: { type: 'disabled' } }]]) assert.equal(hasThinkingBodyConflict(provider, body), true);
+  assert.equal(hasThinkingBodyConflict('openai-responses', { metadata: { fixture: true } }), false);
+});
