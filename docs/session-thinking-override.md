@@ -44,6 +44,18 @@
 - 快速 high→medium→reset 串行提交并使用前次实际 revision；发送只等**当前 conversation**的保存。Composer 的等待/错误也按 conversation 分离，切会话不会阻塞新会话或把旧 await 发送到新会话。ModelProfileSaveStatus 独立于 thinking 能力，未知模型保存错误、重试/重新读取/放弃入口不会随控件消失。
 - **没有“撤销已提交写入”**：放弃未提交草稿只丢本地草稿；有 requestId 时必须 after-read 确认实际状态后放弃。恢复默认是新的 thinking-only CAS reset，不是补偿回写。显式重连保留旧草稿为 detached，不自动跨代提交。
 
+### 渠道无关的操作确认契约
+
+`modelProfileObservation`是read及全部成功mutation的共同构造点。成功mutation统一包含宿主确认的`operation`（实际语义为select/thinking/reset/clear）、实际使用的`expectedRevision`、结果`revision`、scope、authority、sequence及原通道关联的session/correlationId。clear不再依靠缺少profile来猜测操作完成。前端使用发送时保存的submitted操作/基线匹配，而不是当前可能已queued的新选择；同时验证profile/link成对、scope和记录id一致。
+
+`profileState`明确区分：`absent`=没有本scope的profile/link，`default`=有模型记录但无思维覆盖，`overridden`=有显式思维覆盖（包括none/0等显式值），`unknown`=结果未确定。异常路由只能返回unknown，不能表示absence；读到或收到不完整/不一致结构也不能当作保存成功。reset仍区分显式模型（保留模型，仅去覆盖）与inherit-only记录（去掉本地记录、恢复继承），不是clear的别名。
+
+本确认格式与OpenAI/Claude/Gemini/DeepSeek无关，没有改变已有provider能力/格式代码。真实组件script-setup/Pinia→router→authority的交叉测试从OpenAI high切换到：OpenAI另一渠道effort、Gemini budget、Claude budget、Claude adaptive none、DeepSeek none、无thinking能力gpt-4o。每条路径验证select/reset/clear回执、实际落盘与UI观察一致；clear后由当前Agent继承链解析有效模型，再set覆盖（无能力模型执行reset），并生成真实临时Turn/dry-run请求。旧模型expectedEffectiveModel和旧revision均由真实router拒绝，实际absence不改变。
+
+可达性边界：同一健康client/root/scope编辑会话中，clear在途时新selection只queued，直到原clear确认才提交；“新选择已先提交而第一次clear确认才来”不按合法生产路径构造。实际测试暂停真实clear回执，验证queued新渠道被原clear正确释放且旧重复correlationId不能确认新写；显式session/root重连后的迟到clear也不影响新渠道。错误operation/基线、unknown冒充absence或dangling link是结构防御注入，**不宣称**健康宿主会生成这些非法包。gpt-4o不能创建思维覆盖，因此不硬造非法set，而经独立公共恢复入口验证reset/clear无悬挂。
+
+f0751b3的健康clear能凭本地submitted操作和缺少profile完成；本次没有声称必然出现悬挂。真红证明的是宿主回执缺少明确操作/基线/absence语义，以及旧前端无法拒绝这些未证实的确认。旧store快速reset测试曾将显式模型reset简写成absence，本轮改为实际生产的“保留模型、无override”并增加断言，不改变或放松生产reset规则。
+
 ### ModelProfile 局部 session fence：两处复核边界
 
 此 token 仅作用本 `clientId + authorityId(root/lifecycle) + scope`。authority 实例更换/根路径变化会产生新代际；捕获旧根的排队操作逐写点检查 fence，产品 dispose 会 retire authority。使用原有 mutation lock 等待，不强释活锁，不重构其他 Bridge/配置或 Runtime SQLite。
@@ -82,6 +94,9 @@
 | 6727ba4 | scope候选编译失败：role被推断为string；b1897d3修为active as const；原错误日志保留 |
 | 59b553e | scope/router/session初始10项定向绿，非最终统一验证 |
 | 93b703d | 新增部分写故障注入、容量、组件到Turn、Composer scope等待、同Turn native四种选择，共18项定向绿，非最终统一验证 |
+| f0751b3 | 同SHA build/typecheck、scope18、protocol15、完整相关194均绿；两位review原问题CLOSED，但scope新增clear回执P2，不能当最终可发布候选 |
+| 74e059b | 仅新增测试，生产源码/编译closure仍与f0751b3相同；14项2绿12红：六目标渠道+真实延迟clear回执operation缺失、5项结构防御无法拒绝；旧session/authority迟到fence原已通过 |
+| 8d090cb | 共同构造点统一operation/expectedRevision/profileState，前端严格核对；compile/typecheck及clear定向15/15通过；后续最终统一验收另记完整SHA |
 
 最终候选的构建SHA、完整命令与通过/失败计数见交付记录。每轮先固定干净提交再构建，`dist/build-provenance.json` 与 `dist/extension/reliable-kernel-compile-provenance.json` 必须匹配；不同SHA的结果不得混成一次通过。
 
