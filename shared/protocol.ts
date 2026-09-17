@@ -2725,7 +2725,14 @@ export interface ModelProfileScopeReadPayload {
   authorityId?: string;
   afterRequestId?: string;
 }
-export interface ModelProfileScopeSnapshotPayload {
+export interface ModelProfileScopeMutationReceipt {
+  /** Host-confirmed operation and the CAS baseline actually used, independent of provider. */
+  operation: 'select' | 'thinking' | 'reset' | 'clear';
+  expectedRevision: string;
+}
+export interface ModelProfileScopeSnapshotPayload extends Partial<ModelProfileScopeMutationReceipt> {
+  /** absent: no scoped pair; default: pair without override; unknown is never absence. */
+  profileState: 'absent' | 'default' | 'overridden' | 'unknown';
   sessionId?: string;
   scopeKind: ConfigScopeKind;
   scopeId?: string;

@@ -11,7 +11,7 @@ interface PendingModelProfileSelection {
   operation: Operation;
   expectedEffectiveModel?: ChatModelOverrideRecord;
   status: 'draft' | 'saving' | 'uncertain';
-  submitted?: { operation: Operation; profile: ModelProfileRecord };
+  submitted?: { operation: Operation; profile: ModelProfileRecord; expectedRevision: string };
   queued?: boolean;
   error?: string;
 }
@@ -78,7 +78,7 @@ export const useModelProfileStore = defineStore('modelProfile', {
         ...(pending.operation === 'thinking' && profile.thinkingOverride ? { thinkingOverride: plainThinking(profile.thinkingOverride) } : {}),
         ...(pending.operation === 'reset' ? { thinkingOverride: null } : {}) };
       const requestId = bridge.request(pending.operation === 'clear' ? BridgeMessageType.ModelProfileScopeClear : BridgeMessageType.ModelProfileScopeSet, payload);
-      pending.submitted = { operation: pending.operation, profile: { ...profile, ...(profile.thinkingOverride ? { thinkingOverride: plainThinking(profile.thinkingOverride) } : {}) } };
+      pending.submitted = { operation: pending.operation, expectedRevision: saved.revision, profile: { ...profile, ...(profile.thinkingOverride ? { thinkingOverride: plainThinking(profile.thinkingOverride) } : {}) } };
       pending.requestId = requestId; pending.status = 'saving'; pending.queued = false; delete pending.error;
       this.status = '正在保存 LLM 配置…';
       setTimeout(() => { if (this.pendingSelections[key]?.requestId === requestId && this.pendingSelections[key]?.status === 'saving') this.rejectPending(requestId, '保存结果未确定；原操作仍可能在途。请重新读取确认，不会自动重发。'); }, 10000);
@@ -126,13 +126,24 @@ export const useModelProfileStore = defineStore('modelProfile', {
       }
       const previousObservation = this.observations[key];
       if (isRead && read.sessionId && read.sessionId !== payload.sessionId) return;
-      if (isWrite && previousObservation?.sessionId !== payload.sessionId) return;
-      if (isWrite && payload.outcome === 'committed') {
-        const sent = pending?.submitted, actual = payload.profile;
-        const matches = sent && (sent.operation === 'clear' ? !actual
-          : sent.operation === 'reset' ? !actual?.thinkingOverride
-          : actual && JSON.stringify(plainModel(actual)) === JSON.stringify(plainModel(sent.profile))
-            && (sent.operation === 'select' ? !actual.thinkingOverride && !actual.inheritModel : JSON.stringify(actual.thinkingOverride) === JSON.stringify(sent.profile.thinkingOverride)));
+      if (isWrite && (previousObservation?.sessionId !== payload.sessionId || payload.authorityId !== this.authorityId)) return;
+      const actual = payload.profile;
+      const validPair = actual && payload.link?.modelProfileId === actual.id && sameScope(payload.link, scopeOf(payload.scopeKind, payload.scopeId));
+      const actualState = !actual && !payload.link ? 'absent' : validPair ? actual.thinkingOverride ? 'overridden' : 'default' : undefined;
+      if (!actualState || payload.profileState !== actualState || payload.outcome !== (isWrite ? 'committed' : 'observed')) {
+        const message = '配置确认状态不完整；结果未确定，请重新读取。';
+        this.scopeErrors[key] = message;
+        if (isWrite) this.rejectPending(correlationId, message);
+        return;
+      }
+      if (isWrite) {
+        const sent = pending?.submitted;
+        const sameModel = actual && sent && JSON.stringify(plainModel(actual)) === JSON.stringify(plainModel(sent.profile));
+        const matches = sent && payload.operation === sent.operation && payload.expectedRevision === sent.expectedRevision
+          && (sent.operation === 'clear' ? actualState === 'absent'
+            : sent.operation === 'reset' ? sent.profile.inheritModel ? actualState === 'absent' : actualState === 'default' && sameModel && !actual?.inheritModel
+            : sameModel && (sent.operation === 'select' ? actualState === 'default' && !actual?.inheritModel
+              : actualState === 'overridden' && !!actual?.inheritModel === !!sent.profile.inheritModel && JSON.stringify(actual?.thinkingOverride) === JSON.stringify(sent.profile.thinkingOverride)));
         if (!matches) { this.rejectPending(correlationId, '保存确认内容不匹配；结果未确定，请重新读取。'); return; }
       }
       if (payload.authorityId !== this.authorityId) {

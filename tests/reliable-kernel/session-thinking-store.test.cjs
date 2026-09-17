@@ -35,14 +35,16 @@ function fixture() {
   store = load('webview/src/stores/useModelProfileStore.ts').useModelProfileStore();
   load('webview/src/composables/useBridgeBootstrap.ts').useBridgeBootstrap();
   const emit = (type, payload, correlationId) => listeners.get(type)?.({ payload, correlationId });
-  const reply = (request, payload) => emit(protocol.BridgeMessageType.ModelProfileScopeSnapshot, payload, request.id);
+  const reply = (request, payload) => emit(protocol.BridgeMessageType.ModelProfileScopeSnapshot,
+    payload.outcome === 'committed' ? { operation: request.type === protocol.BridgeMessageType.ModelProfileScopeClear ? 'clear' : request.payload.operation, expectedRevision: request.payload.expectedRevision, ...payload } : payload, request.id);
   const read = (scopeId, payload = snapshot(scopeId, 'low', 1)) => { store.refreshScope('conversation', scopeId); reply(requests.at(-1), payload); };
   return { store, client, requests, timers, emit, reply, read };
 }
 const model = { providerConfigId: 'fixture', provider: 'openai-compatible', model: 'o3' };
 function snapshot(scopeId, value, sequence, authorityId = 'root-a') {
-  const profile = value === null ? undefined : { id: `profile-${scopeId}`, name: 'fixture', ...model, thinkingOverride: { kind: 'openai-effort', value } };
+  const profile = value === null ? undefined : { id: `profile-${scopeId}`, name: 'fixture', ...model, ...(value ? { thinkingOverride: { kind: 'openai-effort', value } } : {}) };
   return { scopeKind: 'conversation', scopeId, authorityId, sessionId: `session-${scopeId}-${authorityId}`, sequence, revision: `etag-${scopeId}-${sequence}`, outcome: 'observed', effectiveModel: model,
+    profileState: !profile ? 'absent' : profile.thinkingOverride ? 'overridden' : 'default',
     ...(profile ? { profile, link: { id: `link-${scopeId}`, scopeKind: 'conversation', scopeId, modelProfileId: profile.id, role: 'active', createdAt: 1, updatedAt: sequence } } : {}) };
 }
 const choose = (f, scope, value) => f.store.setThinkingForScope(scope, vue.reactive(model), vue.reactive({ kind: 'openai-effort', value }));
@@ -99,8 +101,10 @@ test('快速high→medium→reset只顺序提交最新草稿，用每次实际ac
   assert.equal(reset.payload.operation, 'reset'); assert.equal(reset.payload.expectedRevision, 'etag-a-2');
   f.reply(first, { ...snapshot('a', 'high', 2), outcome: 'committed' });
   assert.equal(f.store.pendingFor('conversation', 'a').requestId, reset.id);
-  f.reply(reset, { ...snapshot('a', null, 3), outcome: 'committed' });
+  f.reply(reset, { ...snapshot('a', undefined, 3), outcome: 'committed' });
   await f.store.awaitSavedForScope('conversation', 'a');
+  assert.equal(f.store.confirmedFor('conversation', 'a').profile.model, model.model, 'reset of explicit selection preserves model');
+  assert.equal(f.store.confirmedFor('conversation', 'a').profile.thinkingOverride, undefined);
 });
 
 test('无thinking模型失败/超时仍保留通用恢复入口；实际值重读不自动重发', () => {

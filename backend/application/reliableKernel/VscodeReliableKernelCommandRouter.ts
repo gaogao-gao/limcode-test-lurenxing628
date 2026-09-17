@@ -638,7 +638,7 @@ export class VscodeReliableKernelCommandRouter {
       id: randomUUID(), type: BridgeMessageType.ModelProfileScopeSnapshot, channel: 'state', correlationId: message.id, payload: { ...payload, sessionId }
     });
     const failed = (error: unknown): void => reply({ scopeKind: input?.scopeKind, ...(input?.scopeId ? { scopeId: input.scopeId } : {}), authorityId,
-      sequence: 0, revision: '', outcome: 'uncertain', error: error instanceof Error ? error.message : String(error) });
+      sequence: 0, revision: '', profileState: 'unknown', outcome: 'uncertain', error: error instanceof Error ? error.message : String(error) });
     try {
       const mutation = this.product.configuration.mutations;
       const capture = mutation.captureModelProfileRoot(input.authorityId);

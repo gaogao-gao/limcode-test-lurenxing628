@@ -385,6 +385,16 @@ for (const target of clearAckTargets) test(`review scope clear receipt is channe
       assert.equal(cleared.profile, undefined); assert.equal(cleared.link, undefined);
       assert.deepEqual(cleared.effectiveModel, identity);
       assert.equal(status.pending.value, undefined);
+      const staleDraft = { scopeKind: 'conversation', scopeId: 'parent', ...identity, authorityId: cleared.authorityId, sessionId: cleared.sessionId,
+        expectedRevision: cleared.revision, operation: 'thinking', expectedEffectiveModel: { providerConfigId: f.provider.id, provider: f.provider.provider, model: f.provider.model }, thinkingOverride: { kind: 'openai-effort', value: 'high' } };
+      channel.send('old-model-after-clear', channel.T.ModelProfileScopeSet, staleDraft);
+      const staleModel = await channel.receive('old-model-after-clear');
+      assert.equal(staleModel.outcome, 'uncertain'); assert.match(staleModel.error, /继承模型/);
+      channel.send('old-revision-after-clear', channel.T.ModelProfileScopeSet, { ...staleDraft, expectedRevision: reset.revision, expectedEffectiveModel: identity });
+      const staleRevision = await channel.receive('old-revision-after-clear');
+      assert.equal(staleRevision.outcome, 'uncertain'); assert.match(staleRevision.error, /其他窗口/);
+      const stillAbsent = await f.configuration.mutations.readModelProfileScope(f.configuration.mutations.captureModelProfileRoot(), { scopeKind: 'conversation', scopeId: 'parent' });
+      assert.equal(stillAbsent.profile, undefined); assert.equal(stillAbsent.revision, cleared.revision);
       if (target.value) {
         const inherited = await saved(() => control.save(target.value));
         assert.equal(inherited.profile.inheritModel, true);

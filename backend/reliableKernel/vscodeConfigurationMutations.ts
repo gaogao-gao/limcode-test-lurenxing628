@@ -1,5 +1,5 @@
 import { createStorageRevision } from '../capabilities/vscodeStorage/storageRevision';
-import type { ChatModelOverrideRecord, ModelProfileScopeSnapshotPayload, ModelProfileScopeReadPayload } from '../../shared/protocol';
+import type { ChatModelOverrideRecord, ModelProfileScopeMutationReceipt, ModelProfileScopeSnapshotPayload, ModelProfileScopeReadPayload } from '../../shared/protocol';
 import { hasThinkingBodyConflict } from '../../shared/sessionThinkingBody';
 import { validateSessionThinkingOverride } from '../../shared/sessionThinking';
 import { loadLlmProviderConfigsSettings } from '../capabilities/vscodeStorage/llmProviderConfigs';
@@ -145,11 +145,14 @@ export class VscodeConfigurationMutations {
     return { profile, link, revision: createStorageRevision({ scope, profile: profile ?? null, link: link ?? null }) };
   }
 
-  private async modelProfileObservation(capture: ModelProfileRootCapture, scope: ScopeRef, effective?: () => Promise<ChatModelOverrideRecord | undefined>): Promise<ModelProfileScopeSnapshotPayload> {
+  private async modelProfileObservation(capture: ModelProfileRootCapture, scope: ScopeRef, effective?: () => Promise<ChatModelOverrideRecord | undefined>, receipt?: ModelProfileScopeMutationReceipt): Promise<ModelProfileScopeSnapshotPayload> {
     const pair = await this.modelProfilePair(capture.paths, scope);
     const effectiveModel = await effective?.();
     this.assertModelProfileRoot(capture);
-    return { ...scope, ...pair, ...(effectiveModel ? { effectiveModel } : {}), authorityId: capture.authorityId, sequence: ++this.modelProfileSequence, outcome: 'observed' };
+    // One provider-independent shape for reads and every successful mutation, including clear.
+    return { ...scope, ...pair, ...(effectiveModel ? { effectiveModel } : {}), authorityId: capture.authorityId,
+      sequence: ++this.modelProfileSequence, profileState: !pair.profile ? 'absent' : pair.profile.thinkingOverride ? 'overridden' : 'default',
+      ...(receipt ?? {}), outcome: receipt ? 'committed' : 'observed' };
   }
 
   public readModelProfileScope(capture: ModelProfileRootCapture, input: ModelProfileScopeReadPayload, effective?: () => Promise<ChatModelOverrideRecord | undefined>, externalFence?: () => void): Promise<ModelProfileScopeSnapshotPayload> {
@@ -172,10 +175,10 @@ export class VscodeConfigurationMutations {
       const before = await this.modelProfilePair(capture.paths, scope);
       if (before.revision !== payload.expectedRevision) throw new Error('ModelProfile 已被其他窗口修改；草稿已保留，请重新读取后决定。');
       const set = payload as ModelProfileScopeSetPayload;
+      const operation = clear ? 'clear' : set.operation;
+      if (!operation || (!clear && operation !== 'select' && operation !== 'thinking' && operation !== 'reset')) throw new Error('ModelProfile UI mutation 缺少有效操作。');
       let profile: ModelProfileRecord | undefined;
       if (!clear) {
-        const operation = set.operation;
-        if (!operation) throw new Error('ModelProfile UI mutation 缺少明确操作。');
         if (operation === 'thinking' || operation === 'reset') {
           if (scope.scopeKind !== 'conversation') throw new Error('思维覆盖仅限当前对话。');
           const current = await effective?.();
@@ -207,9 +210,9 @@ export class VscodeConfigurationMutations {
       } else {
         await this.clearScoped(modelProfileStore(capture.paths), modelProfileLinkStore(capture.paths), scope, link => link.modelProfileId, guard);
       }
-      const result = await this.modelProfileObservation(capture, scope, effective);
+      const result = await this.modelProfileObservation(capture, scope, effective, { operation, expectedRevision: before.revision });
       guard();
-      return { ...result, outcome: 'committed' };
+      return result;
     });
   }
 
