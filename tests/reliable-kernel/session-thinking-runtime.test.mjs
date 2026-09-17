@@ -340,6 +340,108 @@ for (const transport of ['http', 'websocket']) for (const scenario of [
   });
 });
 
+const clearAckTargets = [
+  { provider: 'openai-compatible', model: 'o3', value: 'medium' },
+  { provider: 'gemini', model: 'gemini-2.5-flash', value: '2048' },
+  { provider: 'claude', model: 'claude-sonnet-4-5', value: '2048' },
+  { provider: 'claude', model: 'claude-opus-4-6', value: 'none' },
+  { provider: 'deepseek', model: 'deepseek-reasoner', value: 'none' },
+  { provider: 'openai-compatible', model: 'gpt-4o' }
+];
+for (const target of clearAckTargets) test(`review scope clear receipt is channel-independent across switch/reset/clear/inherited set: ${target.provider}/${target.model}`, async () => {
+  await fixture(async f => {
+    const provider = { ...f.provider, id: 'target-channel', provider: target.provider, model: target.model, models: [{ id: target.model, name: target.model }], generationConfig: { maxOutputTokens: 8192 } };
+    const identity = { providerConfigId: provider.id, provider: provider.provider, model: provider.model };
+    await f.save('llmProviderConfigs', { configs: [f.provider, provider] });
+    let ui;
+    const channel = scopeRouter(f, message => ui.receive(message));
+    ui = require('./session-thinking-ui-fixture.cjs').createThinkingUi(message => channel.send(message.id, message.type, message.payload));
+    const receipts = [];
+    const saved = async action => {
+      action(); const request = ui.requests.at(-1);
+      await ui.store.awaitSavedForScope('conversation', 'parent');
+      const receipt = await channel.receive(request.id);
+      receipts.push({ request, receipt });
+      assert.equal(ui.store.pendingFor('conversation', 'parent'), undefined);
+      const capture = f.configuration.mutations.captureModelProfileRoot();
+      const disk = await f.configuration.mutations.readModelProfileScope(capture, { scopeKind: 'conversation', scopeId: 'parent' }, () => f.configuration.effectiveConversationModel('parent', f.agent.id));
+      assert.deepEqual(JSON.parse(JSON.stringify(ui.store.confirmedFor('conversation', 'parent').profile ?? null)), disk.profile ?? null);
+      assert.equal(ui.store.confirmedFor('conversation', 'parent').revision, disk.revision);
+      return receipt;
+    };
+    try {
+      ui.store.activateScope('conversation', 'parent'); await channel.receive(ui.requests.at(-1).id);
+      await saved(() => ui.control(f.provider, f.provider.model).save('high'));
+      const selected = await saved(() => ui.store.setProfileForScope('conversation', 'parent', identity));
+      assert.equal(selected.profile.thinkingOverride, undefined, 'model switch clears old OpenAI effort');
+      const status = ui.status(), control = ui.control(provider, provider.model);
+      if (target.value) await saved(() => control.save(target.value));
+      else { assert.equal(control.capability.value, undefined); assert.ok(status.effective.value, 'public recovery does not depend on thinking capability'); }
+      const reset = await saved(() => status.reset());
+      assert.equal(reset.profile.providerConfigId, provider.id, 'reset preserves explicit selected model');
+      assert.equal(reset.profile.thinkingOverride, undefined);
+      await f.configuration.mutations.setModelProfile({ scopeKind: 'agent', scopeId: f.agent.id, ...identity });
+      const cleared = await saved(() => ui.store.clearProfileScope('conversation', 'parent'));
+      assert.equal(cleared.profile, undefined); assert.equal(cleared.link, undefined);
+      assert.deepEqual(cleared.effectiveModel, identity);
+      assert.equal(status.pending.value, undefined);
+      if (target.value) {
+        const inherited = await saved(() => control.save(target.value));
+        assert.equal(inherited.profile.inheritModel, true);
+        assert.deepEqual(ui.requests.at(-1).payload.expectedEffectiveModel, identity);
+        assert.equal(inherited.profile.providerConfigId, provider.id);
+      } else {
+        const absentReset = await saved(() => status.reset());
+        assert.equal(absentReset.profile, undefined, 'unsupported reset confirms absence, never creates an invalid override');
+      }
+      assert.equal((await f.app.agentLoop.runInput(f.input(`clear-channel-${target.model}`))).terminalStatus, 'completed');
+      assert.equal(f.requests.at(-1).modelId, provider.model);
+      const body = f.wires.at(-1).body;
+      if (target.provider === 'gemini') { assert.equal(body.generationConfig.thinkingConfig.thinkingBudget, 2048); assert.equal(body.reasoning_effort, undefined); }
+      if (target.model === 'claude-sonnet-4-5') assert.equal(body.thinking.budget_tokens, 2048);
+      if (target.model === 'gpt-4o') assert.equal(body.reasoning_effort, undefined);
+      // Assert the real wire clear first: no manufactured host payload or bypassed production path.
+      const clearReceipt = receipts.find(item => item.request.type === channel.T.ModelProfileScopeClear);
+      assert.equal(clearReceipt.receipt.operation, 'clear');
+      assert.equal(clearReceipt.receipt.profileState, 'absent');
+      for (const { request, receipt } of receipts) {
+        assert.equal(receipt.operation, request.type === channel.T.ModelProfileScopeClear ? 'clear' : request.payload.operation);
+        assert.equal(receipt.expectedRevision, request.payload.expectedRevision);
+        assert.equal(receipt.profileState, !receipt.profile ? 'absent' : receipt.profile.thinkingOverride ? 'overridden' : 'default');
+        assert.equal(receipt.authorityId, request.payload.authorityId); assert.equal(receipt.sessionId, request.payload.sessionId);
+      }
+    } finally { ui.dispose(); }
+  });
+});
+
+test('review scope delayed real clear ack releases queued new channel only once, duplicate cannot confirm new write', async () => {
+  await fixture(async f => {
+    const provider = { ...f.provider, id: 'queued-gemini', provider: 'gemini', model: 'gemini-2.5-flash', models: [{ id: 'gemini-2.5-flash', name: 'Gemini' }], generationConfig: { maxOutputTokens: 8192 } };
+    await f.save('llmProviderConfigs', { configs: [f.provider, provider] });
+    let ui, delayedId, held;
+    const channel = scopeRouter(f, message => { if (message.correlationId === delayedId) held = message; else ui.receive(message); });
+    ui = require('./session-thinking-ui-fixture.cjs').createThinkingUi(message => channel.send(message.id, message.type, message.payload));
+    try {
+      ui.store.activateScope('conversation', 'parent'); await channel.receive(ui.requests.at(-1).id);
+      ui.control(f.provider, f.provider.model).save('high'); await ui.store.awaitSavedForScope('conversation', 'parent');
+      ui.store.clearProfileScope('conversation', 'parent'); delayedId = ui.requests.at(-1).id;
+      await channel.receive(delayedId); assert.ok(held);
+      ui.store.setProfileForScope('conversation', 'parent', { providerConfigId: provider.id, provider: provider.provider, model: provider.model });
+      assert.equal(ui.requests.at(-1).id, delayedId, 'healthy UI cannot submit newer write before clear settles');
+      ui.receive(held); const selected = ui.requests.at(-1);
+      assert.equal(selected.payload.operation, 'select');
+      ui.receive(held);
+      assert.equal(ui.store.pendingFor('conversation', 'parent').requestId, selected.id);
+      await ui.store.awaitSavedForScope('conversation', 'parent');
+      ui.receive(held);
+      assert.equal(ui.store.effectiveFor('conversation', 'parent').providerConfigId, provider.id);
+      assert.equal(ui.store.confirmedFor('conversation', 'parent').profile.providerConfigId, provider.id);
+      assert.equal(held.payload.operation, 'clear'); assert.equal(held.payload.profileState, 'absent');
+    } finally { ui.dispose(); }
+  });
+});
+
+
 test('子 Agent 自有另一渠道和协议优先，父 OpenAI effort 不写入子 Gemini wire', async () => {
   await fixture(async f => {
     const childProvider = { ...f.provider, id: 'child-gemini', provider: 'gemini', model: 'gemini-2.5-flash', models: [{ id: 'gemini-2.5-flash', name: 'synthetic Gemini' }], generationConfig: { maxOutputTokens: 8192, thinkingConfig: { thinkingBudget: 2048 } } };

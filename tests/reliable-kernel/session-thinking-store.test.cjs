@@ -160,6 +160,38 @@ test('review scope after-read of previous request cannot detach newer queued wri
   assert.equal(f.store.pendingFor('conversation', 'a'), undefined);
 });
 
+for (const invalid of ['missing-operation', 'wrong-operation', 'wrong-baseline', 'unknown-absence', 'dangling-link']) test(`review scope clear receipt rejects unverified operation/baseline/absence: ${invalid}`, () => {
+  const f = fixture(); f.read('a'); f.store.clearProfileScope('conversation', 'a'); const request = f.requests.at(-1);
+  const payload = { ...snapshot('a', null, 2), outcome: 'committed', operation: 'clear', expectedRevision: request.payload.expectedRevision, profileState: 'absent' };
+  if (invalid === 'missing-operation') delete payload.operation;
+  if (invalid === 'wrong-operation') payload.operation = 'reset';
+  if (invalid === 'wrong-baseline') payload.expectedRevision = 'unrelated-etag';
+  if (invalid === 'unknown-absence') payload.profileState = 'unknown';
+  if (invalid === 'dangling-link') payload.link = snapshot('a', 'high', 1).link;
+  f.emit(protocol.BridgeMessageType.ModelProfileScopeSnapshot, payload, request.id);
+  assert.equal(f.store.pendingFor('conversation', 'a')?.status, 'uncertain');
+  assert.equal(f.store.confirmedFor('conversation', 'a').profile.thinkingOverride.value, 'low', 'malformed confirmation cannot clear saved observation');
+});
+
+for (const changed of ['session', 'authority']) test(`review scope delayed clear from old ${changed} cannot confirm switched Gemini selection`, async () => {
+  const f = fixture(); f.read('a'); f.store.clearProfileScope('conversation', 'a'); const clear = f.requests.at(-1);
+  f.store.refreshScope('conversation', 'a', { adoptRoot: true }); const read = f.requests.at(-1);
+  const root = changed === 'authority' ? 'root-b' : 'root-a';
+  const fresh = { ...snapshot('a', null, 2, root), sessionId: 'new-session', profileState: 'absent' };
+  f.reply(read, fresh);
+  const target = { providerConfigId: 'gemini-channel', provider: 'gemini', model: 'gemini-2.5-flash' };
+  f.store.setProfileForScope('conversation', 'a', target); const select = f.requests.at(-1);
+  const late = { ...snapshot('a', null, 99), outcome: 'committed', operation: 'clear', profileState: 'absent', expectedRevision: clear.payload.expectedRevision };
+  f.emit(protocol.BridgeMessageType.ModelProfileScopeSnapshot, late, clear.id);
+  assert.equal(f.store.pendingFor('conversation', 'a').requestId, select.id);
+  assert.equal(f.store.confirmedFor('conversation', 'a').sessionId, 'new-session');
+  const selected = snapshot('a', 'high', 3, root); delete selected.profile.thinkingOverride; Object.assign(selected.profile, target);
+  f.reply(select, { ...selected, effectiveModel: target, sessionId: 'new-session', profileState: 'default', outcome: 'committed', operation: 'select', expectedRevision: select.payload.expectedRevision });
+  await f.store.awaitSavedForScope('conversation', 'a');
+  f.emit(protocol.BridgeMessageType.ModelProfileScopeSnapshot, late, clear.id);
+  assert.equal(f.store.confirmedFor('conversation', 'a').profile.providerConfigId, target.providerConfigId);
+});
+
 function composerSubmit(f) {
   const source = fs.readFileSync('webview/src/components/input/Composer.vue', 'utf8').match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1];
   const ast = ts.createSourceFile('Composer.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
