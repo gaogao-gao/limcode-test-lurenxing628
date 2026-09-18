@@ -71,6 +71,7 @@ const TRACKED_VERIFICATION_SOURCE_ALLOWLIST = new Set([
   'tests/reliable-kernel/request-compression-settings.test.mjs',
   'tests/reliable-kernel/context-token-estimator.test.mjs',
   'tests/reliable-kernel/conversation-fork-context.test.mjs',
+  'tests/reliable-kernel/conversation-fork-lifecycle.test.mjs',
   'tests/reliable-kernel/current-turn-task-projection.test.mjs',
   'tests/reliable-kernel/diagnostic-journal.test.mjs',
   'tests/reliable-kernel/debug-capture-controller.test.mjs',

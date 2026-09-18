@@ -31,6 +31,7 @@ const CI_TEST_FILES = Object.freeze([
   'tests/reliable-kernel/client-feed-window-rollover.test.mjs',
   'tests/reliable-kernel/conversation-deletion-recovery.test.mjs',
   'tests/reliable-kernel/conversation-fork-context.test.mjs',
+  'tests/reliable-kernel/conversation-fork-lifecycle.test.mjs',
   'tests/reliable-kernel/current-turn-task-projection.test.mjs',
   'tests/reliable-kernel/frontend-copy-guardrails.test.cjs',
   'tests/reliable-kernel/guidance-queue.test.mjs',
