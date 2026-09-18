@@ -207,6 +207,20 @@ export class VscodeConfigurationAuthority implements TurnAuthorityCompiler, Atta
     const { agentId, agent, workflowId, workflow, builtinAgent, builtinWorkflow,
       scopesLowToHigh, scopesHighToLow, modelProfile, provider, modelId } = resolveModelSelection(records, request);
 
+    const conversationModelProfile = resolveRecordAtScope(
+      records.modelProfileScopeLinks,
+      records.modelProfiles,
+      { scopeKind: 'conversation', scopeId: request.conversationId },
+      (link) => link.modelProfileId
+    );
+    const effectiveConversationThinkingOverride = conversationModelProfile
+      && conversationModelProfile.providerConfigId === provider.id
+      && conversationModelProfile.provider === provider.provider
+      && conversationModelProfile.model === modelId
+      ? conversationModelProfile.thinkingOverride
+      : undefined;
+    const inheritThinkingToChildren = conversationModelProfile?.inheritThinkingToChildren === true;
+
     const planReviewPolicy = resolveScopedRecord(
       records.planReviewPolicyScopeLinks,
       records.planReviewPolicies,
@@ -394,6 +408,10 @@ export class VscodeConfigurationAuthority implements TurnAuthorityCompiler, Atta
         ...(primaryGenerationConfig?.thinkingConfig
           ? { thinkingConfig: clonePlain(primaryGenerationConfig.thinkingConfig) }
           : {}),
+        ...(effectiveConversationThinkingOverride
+          ? { thinkingOverride: clonePlain(effectiveConversationThinkingOverride) }
+          : {}),
+        ...(inheritThinkingToChildren ? { inheritThinkingToChildren: true } : {}),
         ...(nativeResponses ? { nativeResponses } : {}),
         retryPolicy: frozenProviderRetryPolicy(provider, modelId)
       },
