@@ -192,6 +192,86 @@ test('身份不匹配的 pending RootBinding 继续 fail closed', async () => {
   }
 });
 
+test('旧版本扩展遇到更高 epoch RootBinding 时在迁移前明确拒绝且不写入运行时数据', async () => {
+  const runtimeScopeRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'limcode-newer-epoch-guard-'));
+  try {
+    const paths = kernel.createRuntimeRootPaths(path.join(runtimeScopeRoot, '.limcode-runtime', 'active'));
+    const newerBinding = {
+      paths,
+      dataSetId: 'newer-data-set',
+      rootInstanceId: 'newer-root-instance',
+      rootGeneration: 1,
+      pointerRevision: 1,
+      runtimeKernelEpoch: kernel.RUNTIME_KERNEL_EPOCH + 1
+    };
+    await fs.mkdir(path.dirname(paths.rootPointerPath), { recursive: true });
+    await fs.writeFile(paths.rootPointerPath, `${JSON.stringify(newerBinding, null, 2)}\n`);
+    const pointerBefore = await fs.readFile(paths.rootPointerPath, 'utf8');
+    const authority = new kernel.RootAuthority(() => paths.dataRootPath);
+
+    assert.throws(
+      () => kernel.parseHistoricalRootBinding(newerBinding),
+      /newer than this extension/
+    );
+    await assert.rejects(
+      new VscodeReliableKernelCutoverCoordinator(authority, runtimeScopeRoot).ensureCurrentRoot(),
+      (error) => error?.code === 'runtime-epoch-newer-than-extension'
+        && !error.message.includes('Invalid historical RootBinding pointer')
+    );
+    assert.equal(await fs.readFile(paths.rootPointerPath, 'utf8'), pointerBefore);
+    await assert.rejects(fs.access(paths.rootPendingPath), { code: 'ENOENT' });
+    await assert.rejects(fs.access(paths.runtimeEpochPath), { code: 'ENOENT' });
+    await assert.rejects(fs.access(path.join(path.dirname(paths.dataRootPath), kernel.RUNTIME_EPOCH_MIGRATION_JOURNAL_FILE)), { code: 'ENOENT' });
+  } finally {
+    await fs.rm(runtimeScopeRoot, { recursive: true, force: true });
+  }
+});
+
+test('当前 epoch RootBinding 可作为历史读取结果正常解析', async () => {
+  const runtimeScopeRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'limcode-current-epoch-binding-'));
+  try {
+    const paths = kernel.createRuntimeRootPaths(path.join(runtimeScopeRoot, '.limcode-runtime', 'active'));
+    const binding = {
+      paths,
+      dataSetId: 'current-data-set',
+      rootInstanceId: 'current-root-instance',
+      rootGeneration: 2,
+      pointerRevision: 3,
+      runtimeKernelEpoch: kernel.RUNTIME_KERNEL_EPOCH
+    };
+    await fs.mkdir(path.dirname(paths.rootPointerPath), { recursive: true });
+    await fs.writeFile(paths.rootPointerPath, `${JSON.stringify(binding, null, 2)}\n`);
+
+    assert.deepEqual(await new kernel.RootAuthority(() => paths.dataRootPath).readHistoricalPointerForCutover(), binding);
+  } finally {
+    await fs.rm(runtimeScopeRoot, { recursive: true, force: true });
+  }
+});
+
+test('当前 epoch 下畸形 RootBinding 仍报告真实 historical pointer invalid', async () => {
+  const runtimeScopeRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'limcode-malformed-epoch-binding-'));
+  try {
+    const paths = kernel.createRuntimeRootPaths(path.join(runtimeScopeRoot, '.limcode-runtime', 'active'));
+    const malformedBinding = {
+      paths,
+      dataSetId: 'malformed-data-set',
+      rootInstanceId: 'malformed-root-instance',
+      rootGeneration: 0,
+      pointerRevision: 1,
+      runtimeKernelEpoch: kernel.RUNTIME_KERNEL_EPOCH
+    };
+    await fs.mkdir(path.dirname(paths.rootPointerPath), { recursive: true });
+    await fs.writeFile(paths.rootPointerPath, `${JSON.stringify(malformedBinding, null, 2)}\n`);
+
+    await assert.rejects(
+      new kernel.RootAuthority(() => paths.dataRootPath).readHistoricalPointerForCutover(),
+      (error) => error?.code === 'root-binding-invalid'
+        && error.message.includes('Invalid historical RootBinding pointer')
+    );
+  } finally {
+    await fs.rm(runtimeScopeRoot, { recursive: true, force: true });
+  }
+});
 test('精确 epoch 3 启动时无损升级并保留既有 Conversation', async () => {
   const fixture = await createEpoch3RuntimeFixture('preserve-history');
   let runtime;
