@@ -85,7 +85,7 @@ export function useBridgeBootstrap(): void {
       }
     }),
     bridge.on(BridgeMessageType.GlobalSettingsFlush, (message) => {
-      const sections = session.viewKind === 'globalSettings'
+      const sections: readonly GlobalSettingsSection[] = session.viewKind === 'globalSettings'
         ? CHANNEL_SETTINGS_SECTIONS
         : ['llm'];
       void globalSettings.flushForExecution(sections).then(
