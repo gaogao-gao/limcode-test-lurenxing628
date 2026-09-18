@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import ModelProfileSaveStatus from './ModelProfileSaveStatus.vue';
+import SessionThinkingControl from './SessionThinkingControl.vue';
+import { modelRequestStreamStats } from '@webview/reliability/modelRequestStreamStats';
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { IconFolder, IconListDetails, IconPaperclip, IconPencilExclamation, IconPlayerStop, IconRobot, IconSend2, IconTrash, IconWorld } from '@tabler/icons-vue';
 import { workEnvironmentDisplayPath, workEnvironmentSortKey as buildWorkEnvironmentSortKey } from '@shared/workEnvironmentCatalog';
@@ -94,8 +97,21 @@ const draft = computed({
   set: (next: string) => ui.setComposerDraft(next)
 });
 // Interaction 与普通输入是独立控制面：等待 AskUser/Plan 时，用户仍可创建排队 TurnIntent。
+const savingSessionSelections = ref<Record<string, boolean>>({});
+const savingSessionSelection = computed(() => savingSessionSelections.value[clientState.currentConversationId] === true);
+const sessionSaveErrors = ref<Record<string, string>>({});
+const latestThinkingSelection = computed(() => {
+  const turns = new Set(Object.values(reliableConversation.feed.records.Turn ?? {}).filter((turn) => turn.conversation_id === clientState.currentConversationId).map((turn) => turn.id));
+  const requests = Object.values(reliableConversation.feed.records.ModelRequest ?? {}).filter((request) => turns.has(request.turn_id))
+    .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)) || Number(b.request_seq) - Number(a.request_seq));
+  for (const request of requests) {
+    const value = modelRequestStreamStats(request)?.thinkingSelection;
+    if (typeof value === 'string') return value;
+  }
+  return '暂无已记录请求';
+});
 const conversationInputDisabled = computed(() =>
-  props.disabled || Boolean(currentSubmissionCommandId.value) || currentSteeringSubmitting.value
+  savingSessionSelection.value || props.disabled || Boolean(currentSubmissionCommandId.value) || currentSteeringSubmitting.value
 );
 const effectivePlaceholder = computed(() => props.placeholder);
 const expandTitle = computed(() => (editorExpanded.value ? '恢复输入框高度' : '扩大输入框'));
@@ -191,10 +207,16 @@ const activeWorkflowId = computed({
   get: () => workflowStore.activeWorkflowIdForConversation(clientState.currentConversationId),
   set: (workflowId: string) => selectWorkflow(workflowId)
 });
+const confirmedEffectiveModel = computed(() => modelProfileStore.effectiveFor('conversation', clientState.currentConversationId));
+watch(() => [clientState.currentConversationId, activeAgentId.value, activeWorkflowId.value], (_value, _old, onCleanup) => {
+  const id = clientState.currentConversationId;
+  if (id) onCleanup(modelProfileStore.activateScope('conversation', id));
+}, { immediate: true });
 const activeChannelId = computed({
   get: () => {
     const conversationId = clientState.currentConversationId;
-    const profileConfigId = conversationId ? modelProfileStore.localProfileFor('conversation', conversationId).profile?.providerConfigId?.trim() : '';
+    const pending = conversationId ? modelProfileStore.pendingFor('conversation', conversationId) : undefined;
+    const profileConfigId = pending?.operation === 'select' ? pending.profile.providerConfigId?.trim() : confirmedEffectiveModel.value?.providerConfigId;
     return profileConfigId || globalSettings.llm.activeProviderConfigId || globalSettings.activeLlmProviderConfig?.id || '';
   },
   set: (configId: string) => selectChannel(configId)
@@ -377,7 +399,16 @@ function onWindowResize(): void {
   updateExpandedEditorHeight();
 }
 
-function submit(): void {
+async function submit(): Promise<void> {
+  const conversationId = clientState.currentConversationId;
+  if (conversationInputDisabled.value) return;
+  savingSessionSelections.value[conversationId] = true;
+  delete sessionSaveErrors.value[conversationId];
+  try {
+    await modelProfileStore.awaitSavedForScope('conversation', conversationId);
+  } catch (error) { sessionSaveErrors.value[conversationId] = error instanceof Error ? error.message : String(error); return; }
+  finally { delete savingSessionSelections.value[conversationId]; }
+  if (clientState.currentConversationId !== conversationId) return;
   const text = draft.value.trim();
   if ((!text && selectedAttachments.value.length === 0) || conversationInputDisabled.value) return;
   const content = buildMessageContent(text, selectedAttachments.value);
@@ -577,7 +608,8 @@ function providerLabel(provider: string): string {
 
 function selectedModelForConfig(config: LlmProviderConfigRecord): string {
   const conversationId = clientState.currentConversationId;
-  const profile = conversationId ? modelProfileStore.localProfileFor('conversation', conversationId).profile : undefined;
+  const pending = conversationId ? modelProfileStore.pendingFor('conversation', conversationId) : undefined;
+  const profile = pending?.operation === 'select' ? pending.profile : confirmedEffectiveModel.value;
   const profileModel = profile?.providerConfigId?.trim() === config.id ? profile.model.trim() : '';
   return profileModel && modelExistsInConfig(config, profileModel) ? profileModel : config.model;
 }
@@ -876,6 +908,8 @@ function middleEllipsis(value: string, maxLength: number): string {
     </div>
 
     <div class="composer-zone composer-zone-bottom" aria-label="输入框下方功能区">
+      <ModelProfileSaveStatus v-if="clientState.currentConversationId" scope-kind="conversation" :scope-id="clientState.currentConversationId" :send-error="sessionSaveErrors[clientState.currentConversationId]" />
+      <SessionThinkingControl v-if="clientState.currentConversationId && activeChannelConfig && confirmedEffectiveModel && confirmedEffectiveModel.providerConfigId === activeChannelConfig.id" :conversation-id="clientState.currentConversationId" :config="activeChannelConfig" :model="confirmedEffectiveModel.model" :recent="latestThinkingSelection" />
       <div v-if="agentOptions.length || workflowOptions.length || channelOptions.length || workEnvironmentOptions.length" class="composer-meta">
         <template v-if="agentOptions.length">
           <SettingsDropdown

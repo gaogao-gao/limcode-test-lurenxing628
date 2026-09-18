@@ -1,3 +1,7 @@
+import { hasThinkingBodyConflict } from '../../shared/sessionThinkingBody';
+import { applySessionThinkingOverride, validateSessionThinkingOverride } from '../../shared/sessionThinking';
+import type { RequestGenerationSettings } from './requestCompressionSettings';
+
 import type * as vscode from 'vscode';
 import type {
   AgentRecord,
@@ -153,6 +157,13 @@ export class VscodeConfigurationAuthority implements TurnAuthorityCompiler, Atta
     this.setCurrentWorkspaceFolders(currentWorkspaceFolders);
   }
 
+  /** Same authority resolution as Turn compilation, without starting a Turn or selecting a model. */
+  public async effectiveConversationModel(conversationId: string, executorAgentId: string): Promise<ChatModelOverrideRecord> {
+    const compiled = await this.compile({ conversationId, executorAgentId, turnId: `model-profile-observation:${conversationId}`, intentKind: 'input' });
+    const document = JSON.parse(String(compiled.authoritySnapshot.content));
+    return { providerConfigId: document.model.providerConfigId, provider: document.model.provider, model: document.model.modelId };
+  }
+
   public async compile(request: TurnAuthorityCompilationRequest): Promise<CompiledTurnAuthority> {
     const records = await this.loadRecords();
     const agentId = requireId(request.executorAgentId, 'executorAgentId');
@@ -180,10 +191,11 @@ export class VscodeConfigurationAuthority implements TurnAuthorityCompiler, Atta
     const scopesHighToLow = [...scopesLowToHigh].reverse();
 
     const inheritedModelFallback = request.modelFallback;
+    const selectableModelProfiles = records.modelProfiles.filter(profile => !profile.inheritModel);
     const nonGlobalModelProfile = inheritedModelFallback
       ? resolveScopedRecord(
           records.modelProfileScopeLinks,
-          records.modelProfiles,
+          selectableModelProfiles,
           scopesHighToLow.filter((scope) => scope.scopeKind !== 'global'),
           (link) => link.modelProfileId
         )
@@ -191,7 +203,7 @@ export class VscodeConfigurationAuthority implements TurnAuthorityCompiler, Atta
     const globalModelProfile = inheritedModelFallback
       ? resolveRecordAtScope(
           records.modelProfileScopeLinks,
-          records.modelProfiles,
+          selectableModelProfiles,
           { scopeKind: 'global' },
           (link) => link.modelProfileId
         )
@@ -200,7 +212,7 @@ export class VscodeConfigurationAuthority implements TurnAuthorityCompiler, Atta
       ? nonGlobalModelProfile
       : resolveScopedRecord(
           records.modelProfileScopeLinks,
-          records.modelProfiles,
+          selectableModelProfiles,
           scopesHighToLow,
           (link) => link.modelProfileId
         );
@@ -954,6 +966,26 @@ export class VscodeConfigurationAuthority implements TurnAuthorityCompiler, Atta
       conversationWorkflowSelections: conversationWorkflowSelections ?? [],
       conversationWorkEnvironmentLinks: conversationWorkEnvironmentLinks ?? []
     };
+  }
+
+  public async loadRequestGenerationSettings(model: ChatModelOverrideRecord, conversationId: string): Promise<RequestGenerationSettings> {
+    const records = await this.loadRecords();
+    const provider = records.providerConfigs.find((item) => item.id === model.providerConfigId);
+    if (!provider || provider.provider !== model.provider || !providerContainsModel(provider, model.model)) throw new Error('当前请求渠道或模型已改变，请重新选择。');
+    // Resolve only this conversation. Agent/workflow/global profiles and parent Turn fallbacks
+    // select model identity, never a parent's session-only override.
+    const profile = resolveRecordAtScope(records.modelProfileScopeLinks, records.modelProfiles,
+      { scopeKind: 'conversation', scopeId: conversationId }, (link) => link.modelProfileId);
+    const modelConfig = provider.modelConfigs.find((item) => item.modelId === model.model);
+    const defaults = modelConfig ? modelConfig.generationConfig : provider.generationConfig;
+    const requestBody = (modelConfig ? modelConfig.requestBody : provider.requestBody) ?? {};
+    const override = profile?.providerConfigId === provider.id && profile.provider === provider.provider && profile.model === model.model
+      ? profile.thinkingOverride : undefined;
+    if (override) {
+      if (hasThinkingBodyConflict(provider.provider, requestBody)) throw new Error('自定义请求体与会话思维覆盖冲突，请恢复默认或修改渠道配置。');
+      validateSessionThinkingOverride(override, provider.provider, model.model, defaults, requestBody);
+    }
+    return { model: { ...model }, generationConfig: applySessionThinkingOverride(defaults, override), requestBody: clonePlain(requestBody), thinkingControlledByBody: hasThinkingBodyConflict(provider.provider, requestBody) };
   }
 
   public async loadRequestCompressionSettings(
