@@ -1221,7 +1221,7 @@ export const useGlobalSettingsStore = defineStore('globalSettings', {
         });
       }
     },
-    flushForExecution(sections = CHANNEL_SETTINGS_SECTIONS): Promise<void> {
+    flushForExecution(sections: readonly GlobalSettingsSection[] = CHANNEL_SETTINGS_SECTIONS): Promise<void> {
       if (llmProviderConfigsAutoSaveTimer !== undefined) this.saveLlmProviderConfigs();
       if (llmCompressionConfigsAutoSaveTimer !== undefined) this.saveLlmCompressionConfigs();
       return new Promise<void>((resolve, reject) => {
