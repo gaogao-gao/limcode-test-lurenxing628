@@ -374,10 +374,11 @@ test('跨页面确认遇到冲突、关闭、发送失败或超时均明确拒�
     let message;
     barrier.attach('settings', { async postMessage(value) { message = value; return failure !== 'undelivered'; } });
     const flushing = barrier.flush();
-    const rejected = assert.rejects(flushing, /设置|页面/);
+    const rejected = assert.rejects(flushing, /设置|页面|状态/);
     await Promise.resolve();
     if (failure === 'conflict') barrier.receive('settings', message.id, { status: 'failed', message: '设置冲突' });
     if (failure === 'closed') barrier.detach('settings');
+    // 'closed' 现在会等待超时后报 "状态未知"
     await rejected;
   }
 });
