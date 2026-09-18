@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { BridgeMessageType, type GlobalSettingsFlushResultPayload } from '../../../shared/protocol';
+import { toStructuredClonePlainData } from '../../../shared/plainData';
 
 interface SettingsClient {
   postMessage(message: unknown): PromiseLike<boolean>;
@@ -71,9 +72,9 @@ export class GlobalSettingsSaveBarrier {
         finish
       });
       for (const [, client] of clients) {
-        Promise.resolve().then(() => client.postMessage({
+        Promise.resolve().then(() => client.postMessage(toStructuredClonePlainData({
           id, type: BridgeMessageType.GlobalSettingsFlush, channel: 'settings'
-        })).then(
+        }, 'global settings flush message'))).then(
           (delivered) => { if (!delivered) finish(new Error('设置页面未收到保存确认请求，请重新打开该页面后重试。')); },
           () => finish(new Error('无法联系设置页面，请确认设置后重试。'))
         );
