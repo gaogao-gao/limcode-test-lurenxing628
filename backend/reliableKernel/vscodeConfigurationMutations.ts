@@ -1,5 +1,5 @@
 import { createStorageRevision } from '../capabilities/vscodeStorage/storageRevision';
-import type { ChatModelOverrideRecord, ModelProfileScopeMutationReceipt, ModelProfileScopeSnapshotPayload, ModelProfileScopeReadPayload } from '../../shared/protocol';
+import type { ChatModelOverrideRecord, ModelProfileScopeMutationReceipt, ModelProfileScopeSnapshotPayload, ModelProfileScopeReadPayload, SessionThinkingOverride, SystemPromptScopeSetPayload } from '../../shared/protocol';
 import { hasThinkingBodyConflict } from '../../shared/sessionThinkingBody';
 import { validateSessionThinkingOverride } from '../../shared/sessionThinking';
 import { loadLlmProviderConfigsSettings } from '../capabilities/vscodeStorage/llmProviderConfigs';
