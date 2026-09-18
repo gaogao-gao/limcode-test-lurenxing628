@@ -31,6 +31,7 @@ import {
   latestTimelineSegmentStart,
   prioritizedTimelineDetailDemand
 } from './segmentedTimeline';
+import { captureScrollAnchor, restoreScrollAfterHistoryLoad, releaseStickyFromUserScroll } from './scrollAnchor';
 
 const props = withDefaults(defineProps<{ emptyHint?: string; scroller?: HTMLElement | null }>(), {
   emptyHint: '还没有消息，发一条试试。',
@@ -72,6 +73,11 @@ const compressionBlocks = computed(() => Object.values(feed.records.CompressionB
 const segmentStart = ref(0);
 const followLatestSegment = ref(true);
 const pendingHistoryAnchorId = ref<string | null>(null);
+const pendingScrollAnchor = ref<{
+  anchorId: string | null;
+  anchorIndex: number;
+  metricsBeforeLoad: { scrollTop: number; scrollHeight: number; clientHeight: number } | null;
+} | null>(null);
 const visibleTimelineRows = computed(() => messages.value.slice(
   segmentStart.value,
   segmentStart.value + TIMELINE_MOUNT_LIMIT
@@ -150,6 +156,24 @@ watch(
       messages.value.length,
       Math.max(0, anchorIndex - TIMELINE_SEGMENT_STEP)
     );
+
+    const saved = pendingScrollAnchor.value;
+    pendingScrollAnchor.value = null;
+    if (!saved?.metricsBeforeLoad || !saved.anchorId) return;
+
+    const restored = restoreScrollAfterHistoryLoad({
+      scroller: props.scroller,
+      anchor: saved,
+      messagesLength: messages.value.length,
+      segmentStep: TIMELINE_SEGMENT_STEP
+    });
+
+    if (restored && props.scroller) {
+      const target = Math.max(0, Math.min(restored.scrollTop, props.scroller.scrollHeight - props.scroller.clientHeight));
+      if (Math.abs(props.scroller.scrollTop - target) > 1) {
+        props.scroller.scrollTop = target;
+      }
+    }
   }
 );
 
@@ -381,6 +405,14 @@ function runHadCompletedTools(message: MessageRecord): boolean {
 }
 
 function showEarlierSegment(): void {
+  const scroller = props.scroller;
+  const anchor = captureScrollAnchor({
+    scroller,
+    visibleRows: visibleTimelineRows.value,
+    pendingAnchorId: pendingHistoryAnchorId.value
+  });
+  pendingScrollAnchor.value = anchor;
+
   if (segmentStart.value > 0) {
     followLatestSegment.value = false;
     segmentStart.value = clampTimelineSegmentStart(
@@ -394,7 +426,10 @@ function showEarlierSegment(): void {
       pendingHistoryAnchorId.value = anchorId;
     }
   }
-  props.scroller?.scrollTo({ top: 0 });
+
+  if (anchor.metricsBeforeLoad) {
+    releaseStickyFromUserScroll(scroller);
+  }
 }
 
 function showLaterSegment(): void {
