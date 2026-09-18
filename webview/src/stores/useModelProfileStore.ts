@@ -40,7 +40,10 @@ export const useModelProfileStore = defineStore('modelProfile', {
       this.refreshScope(scopeKind, scopeId);
       return () => { if (--active.users <= 0) delete this.activeScopes[key]; };
     },
-    errorFor(scopeKind: ConfigScopeKind, scopeId?: string): string { return this.scopeErrors[keyOf(scopeKind, scopeId)] ?? ''; },
+    errorFor(scopeKind: ConfigScopeKind, scopeId?: string): string {
+      const key = keyOf(scopeKind, scopeId);
+      return this.scopeErrors[key] ?? this.pendingSelections[key]?.error ?? '';
+    },
     confirmedFor(scopeKind: ConfigScopeKind, scopeId?: string): ModelProfileScopeSnapshotPayload | undefined { return this.observations[keyOf(scopeKind, scopeId)]; },
     effectiveFor(scopeKind: ConfigScopeKind, scopeId?: string): ChatModelOverrideRecord | undefined { return this.confirmedFor(scopeKind, scopeId)?.effectiveModel; },
     localProfileFor(scopeKind: ConfigScopeKind, scopeId?: string): { profile?: ModelProfileRecord; link?: ModelProfileScopeLinkRecord } {

@@ -31,7 +31,6 @@ import type {
   SkillPolicyScopeSetPayload,
   SystemPromptRecord,
   SystemPromptScopeLinkRecord,
-  SystemPromptScopeSetPayload,
   ToolPolicyRecord,
   ToolPolicyScopeLinkRecord,
   ToolPolicyScopeSetPayload,
@@ -176,7 +175,13 @@ export class VscodeConfigurationMutations {
       if (before.revision !== payload.expectedRevision) throw new Error('ModelProfile 已被其他窗口修改；草稿已保留，请重新读取后决定。');
       const set = payload as ModelProfileScopeSetPayload;
       const operation = clear ? 'clear' : set.operation;
-      if (!operation || (!clear && operation !== 'select' && operation !== 'thinking' && operation !== 'reset')) throw new Error('ModelProfile UI mutation 缺少有效操作。');
+      if (!operation || (!clear && operation !== 'select' && operation !== 'thinking' && operation !== 'reset' && operation !== 'inherit')) throw new Error('ModelProfile UI mutation 缺少有效操作。');
+      if (!clear && set.inheritThinkingToChildren !== undefined && scope.scopeKind !== 'conversation') {
+        throw new Error('子继承仅限当前对话。');
+      }
+      const inheritThinkingToChildren = scope.scopeKind === 'conversation'
+        ? set.inheritThinkingToChildren ?? before.profile?.inheritThinkingToChildren
+        : undefined;
       let profile: ModelProfileRecord | undefined;
       if (!clear) {
         if (operation === 'thinking' || operation === 'reset') {
@@ -184,13 +189,37 @@ export class VscodeConfigurationMutations {
           const current = await effective?.();
           if (!current || createStorageRevision(current) !== createStorageRevision(set.expectedEffectiveModel ?? null)) throw new Error('当前继承模型已改变；没有固定旧模型，请重新读取。');
           if (operation === 'reset') {
-            if (before.profile && !before.profile.inheritModel) { const { thinkingOverride: _removed, ...kept } = before.profile; profile = kept; }
+            if (before.profile && !before.profile.inheritModel) {
+              const { thinkingOverride: _removed, ...kept } = before.profile;
+              profile = { ...kept, ...(inheritThinkingToChildren ? { inheritThinkingToChildren: true } : {}) };
+            }
           } else {
             if (set.thinkingOverride == null) throw new Error('思维修改缺少参数；恢复默认请用 reset。');
-            profile = { ...(before.profile ?? { id: scopeRecordId('model-profile', scope), name: '会话思维覆盖', inheritModel: true }), ...current, thinkingOverride: set.thinkingOverride };
+            profile = {
+              ...(before.profile ?? { id: scopeRecordId('model-profile', scope), name: '会话思维覆盖', inheritModel: true }),
+              ...current,
+              ...(inheritThinkingToChildren ? { inheritThinkingToChildren: true } : {}),
+              thinkingOverride: set.thinkingOverride
+            };
           }
+        } else if (operation === 'inherit') {
+          if (scope.scopeKind !== 'conversation') throw new Error('子继承仅限当前对话。');
+          const current = await effective?.();
+          if (!current || createStorageRevision(current) !== createStorageRevision(set.expectedEffectiveModel ?? null)) throw new Error('当前继承模型已改变；没有固定旧模型，请重新读取。');
+          profile = {
+            ...(before.profile ?? { id: scopeRecordId('model-profile', scope), name: '会话思维覆盖', inheritModel: true }),
+            ...current,
+            ...(inheritThinkingToChildren ? { inheritThinkingToChildren: true } : {})
+          };
         } else {
-          profile = { id: before.profile?.id ?? scopeRecordId('model-profile', scope), name: set.name?.trim() || before.profile?.name || 'LLM 配置', providerConfigId: set.providerConfigId, provider: set.provider, model: requireId(set.model, 'model') };
+          profile = {
+            id: before.profile?.id ?? scopeRecordId('model-profile', scope),
+            name: set.name?.trim() || before.profile?.name || 'LLM 配置',
+            providerConfigId: set.providerConfigId,
+            provider: set.provider,
+            model: requireId(set.model, 'model'),
+            ...(inheritThinkingToChildren ? { inheritThinkingToChildren: true } : {})
+          };
         }
       }
       if (profile?.thinkingOverride) {
@@ -390,8 +419,11 @@ export class VscodeConfigurationMutations {
   public setModelProfile(payload: ModelProfileScopeSetPayload): Promise<void> {
     const scope = normalizeScope(payload.scopeKind, payload.scopeId);
     const model = requireId(payload.model, 'model');
+    if (payload.inheritThinkingToChildren !== undefined && scope.scopeKind !== 'conversation') {
+      throw new Error('子继承仅限当前对话。');
+    }
     return this.mutate(async (paths) => {
-      let thinkingOverride: ModelProfileRecord['thinkingOverride'];
+      let thinkingOverride: SessionThinkingOverride | undefined;
       if (payload.thinkingOverride != null) {
         if (scope.scopeKind !== 'conversation') throw new Error('思维覆盖仅限当前对话。');
         const providers = await loadLlmProviderConfigsSettings(paths);
@@ -415,7 +447,11 @@ export class VscodeConfigurationMutations {
           : existing?.providerConfigId ? { providerConfigId: existing.providerConfigId } : {}),
         ...(payload.provider ? { provider: payload.provider } : existing?.provider ? { provider: existing.provider } : {}),
         model,
-        ...(thinkingOverride ? { thinkingOverride } : {})
+        ...(thinkingOverride ? { thinkingOverride } : {}),
+         ...(scope.scopeKind === 'conversation'
+           && (payload.inheritThinkingToChildren ?? existing?.inheritThinkingToChildren)
+           ? { inheritThinkingToChildren: true }
+           : {})
       }),
       (existing, recordId, now) => ({
         id: existing?.id ?? scopeLinkId('model-profile', scope),
@@ -438,6 +474,7 @@ export class VscodeConfigurationMutations {
     providerConfigId?: string;
     provider?: ModelProfileScopeSetPayload['provider'];
     model: string;
+    thinkingOverride?: SessionThinkingOverride;
   }): Promise<{ created: boolean }> {
     const scope = normalizeScope('conversation', input.conversationId);
     const model = requireId(input.model, 'model');
@@ -459,12 +496,33 @@ export class VscodeConfigurationMutations {
 
       const now = Date.now();
       const providerConfigId = normalizedOptionalText(input.providerConfigId);
+       let thinkingOverride: SessionThinkingOverride | undefined;
+       if (input.thinkingOverride) {
+         const providers = await loadLlmProviderConfigsSettings(paths);
+         const provider = providers.settings.configs.find((item) => item.id === providerConfigId);
+         if (!provider || provider.provider !== input.provider || !(provider.model === model || provider.models.some((item) => item.id === model))) {
+           throw new Error('子会话思维覆盖的渠道或模型不存在。');
+         }
+         const modelConfig = provider.modelConfigs.find((item) => item.modelId === model);
+         const body = modelConfig ? modelConfig.requestBody : provider.requestBody;
+         if (hasThinkingBodyConflict(provider.provider, body)) throw new Error('子会话自定义请求体控制思维或输出参数。');
+         thinkingOverride = validateSessionThinkingOverride(
+           input.thinkingOverride,
+           provider.provider,
+           model,
+           modelConfig ? modelConfig.generationConfig : provider.generationConfig,
+           body
+         );
+       }
+
       const record: ModelProfileRecord = {
         id: scopeRecordId(recordStore.idPrefix, scope),
         name: '子对话继承 LLM',
         ...(providerConfigId ? { providerConfigId } : {}),
         ...(input.provider ? { provider: input.provider } : {}),
-        model
+        model,
+        ...(thinkingOverride ? { thinkingOverride } : {}),
+
       };
       const link: ModelProfileScopeLinkRecord = {
         id: scopeLinkId('model-profile', scope),

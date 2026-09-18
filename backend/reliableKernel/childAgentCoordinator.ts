@@ -35,7 +35,7 @@ import type {
   TurnControlPlane,
   TurnModelOverride
 } from './turnControlPlane';
-import type { CompressionCommandTarget, MessageRetryTarget } from '../../shared/protocol';
+import type { CompressionCommandTarget, MessageRetryTarget, SessionThinkingOverride } from '../../shared/protocol';
 import {
   ExecutionHandoffError,
   isExecutionHandoffError,
@@ -46,6 +46,7 @@ import {
 import { isConversationRuntimeOwnerBusyError } from './ConversationRuntimeOwnerManager';
 import { ConversationOwnershipGate } from './conversationOwnershipGate';
 import { maxChildAgentDepthFromConfig } from '../world/modules/tools/definitions/runAgent';
+import { childThinkingInheritanceFromAuthority, childThinkingOverrideForSpawn } from './childThinkingInheritance';
 import { childAgentDepthForTurn } from './childAgentDepth';
 
 export interface ReliableChildAgentSelection {
@@ -62,6 +63,7 @@ export interface ReliableChildModelProfileStore {
   initializeConversation(input: {
     conversationId: string;
     model: TurnModelOverride;
+    thinkingOverride?: SessionThinkingOverride;
   }): Promise<{ created: boolean }>;
 }
 
@@ -1365,6 +1367,8 @@ export class ReliableChildAgentCoordinator {
     const deadline = completionPolicy === 'wait_for_answer'
       ? new Date(Date.parse(this.timestamp()) + foregroundWaitMs).toISOString()
       : undefined;
+    const inheritance = childThinkingInheritanceFromAuthority(authority?.document);
+    const inheritedThinkingOverride = childThinkingOverrideForSpawn(inheritance);
     const spawned = await this.dependencies.children.spawn({
       sourceToolCallId: input.toolCallId,
       childAgentId: selection.agentId,
@@ -2198,6 +2202,7 @@ export class ReliableChildAgentCoordinator {
       ...(turnId ? { turnId } : {})
     }, error);
   }
+
 }
 
 function frozenParentModelSelection(
