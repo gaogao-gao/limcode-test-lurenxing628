@@ -623,9 +623,25 @@ async function readHistoricalBindingFile(filePath: string): Promise<HistoricalRo
     throw error;
   }
   try {
-    return parseHistoricalRootBinding(JSON.parse(text));
+    const value = JSON.parse(text);
+    assertHistoricalEpochSupported(value, filePath);
+    return parseHistoricalRootBinding(value);
   } catch (error) {
+    if (error instanceof RootAuthorityError && error.code === 'runtime-epoch-newer-than-extension') {
+      throw error;
+    }
     throw new RootAuthorityError('root-binding-invalid', `Invalid historical RootBinding pointer: ${filePath}`, error);
+  }
+}
+
+function assertHistoricalEpochSupported(value: unknown, filePath: string): void {
+  const record = requireRecord(value, 'RootBinding');
+  const epoch = record.runtimeKernelEpoch;
+  if (Number.isSafeInteger(epoch) && (epoch as number) > RUNTIME_KERNEL_EPOCH) {
+    throw new RootAuthorityError(
+      'runtime-epoch-newer-than-extension',
+      `RootBinding pointer requires Runtime epoch ${epoch}, but this extension supports through ${RUNTIME_KERNEL_EPOCH}: ${filePath}`
+    );
   }
 }
 
