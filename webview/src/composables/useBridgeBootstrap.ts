@@ -7,7 +7,7 @@ import {
 import { bridge, BridgeMessageType } from '@webview/transport';
 import { useSessionStore } from '@webview/stores/useSessionStore';
 import { useClientStateStore } from '@webview/stores/useClientStateStore';
-import { useGlobalSettingsStore } from '@webview/stores/useGlobalSettingsStore';
+import { useGlobalSettingsStore, CHANNEL_SETTINGS_SECTIONS } from '@webview/stores/useGlobalSettingsStore';
 import { useConversationSettingsStore } from '@webview/stores/useConversationSettingsStore';
 import { useSystemPromptStore } from '@webview/stores/useSystemPromptStore';
 import { useRuntimeContextStore } from '@webview/stores/useRuntimeContextStore';

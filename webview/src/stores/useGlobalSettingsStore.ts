@@ -54,7 +54,7 @@ import { bridge, BridgeMessageType } from '@webview/transport';
 
 type SelectableCompressionMethodKind = 'openai_responses_compact' | 'llm_summary' | 'segmented_summary' | 'deterministic_summary';
 const TOKEN_STEP = 1_000;
-const CHANNEL_SETTINGS_SECTIONS = ['llm', 'llmProviderConfigs', 'llmCompression', 'llmCompressionConfigs'] as const satisfies readonly GlobalSettingsSection[];
+export const CHANNEL_SETTINGS_SECTIONS = ['llm', 'llmProviderConfigs', 'llmCompression', 'llmCompressionConfigs'] as const satisfies readonly GlobalSettingsSection[];
 type GlobalSettingsSectionMessages = Partial<Record<GlobalSettingsSection, string>>;
 
 interface FetchedModelsDialogState {
