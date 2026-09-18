@@ -37,8 +37,7 @@ exports.createThinkingUi = function createThinkingUi(send) {
   return {
     store, requests,
     receive(message) { if (message.type === protocol.BridgeMessageType.ModelProfileScopeSnapshot) store.applyScopeSnapshot(message.payload, message.correlationId); },
-    control(config, model, conversationId = 'parent') { return load('webview/src/components/input/SessionThinkingControl.vue', vue.reactive({ config, model, conversationId, recent: '' }), ['save', 'summary', 'capability', 'defaultLabel', 'error']); },
-    status(conversationId = 'parent') { return load('webview/src/components/input/ModelProfileSaveStatus.vue', vue.reactive({ scopeKind: 'conversation', scopeId: conversationId }), ['reset', 'saved', 'pending', 'effective']); },
+    control(config, model, conversationId = 'parent') { return load('webview/src/components/input/SessionThinkingControl.vue', vue.reactive({ config, model, conversationId, recent: '' }), ['save', 'selected', 'capability', 'defaultLabel', 'error']); },
     dispose() { for (const timer of timers) clearTimeout(timer); }
   };
 };

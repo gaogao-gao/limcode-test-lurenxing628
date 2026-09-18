@@ -234,3 +234,31 @@ test('review scope production Composer submit waits only origin conversation; na
   assert.match(template, /:model="confirmedEffectiveModel\?\.model"/);
 });
 
+
+test('sessionless broadcasts invalidate only active same-authority newer scope; never acknowledge a write', () => {
+  const f = fixture(); f.store.activateScope('conversation', 'a'); f.reply(f.requests.at(-1), snapshot('a', 'low', 1));
+  choose(f, 'a', 'high'); const pending = f.store.pendingFor('conversation', 'a');
+  const peer = { ...snapshot('a', 'medium', 2), outcome: 'committed' }; delete peer.sessionId;
+  f.emit(protocol.BridgeMessageType.ModelProfileScopeSnapshot, peer);
+  assert.equal(f.store.errorFor('conversation', 'a'), '');
+  assert.equal(f.store.confirmedFor('conversation', 'a').profile.thinkingOverride.value, 'low', 'invalidation is not a replacement for locked observation');
+  assert.equal(f.store.pendingFor('conversation', 'a').requestId, pending.requestId);
+  assert.equal(f.store.pendingFor('conversation', 'a').status, 'saving');
+  assert.equal(f.store.readingFor('conversation', 'a'), true, 'peer update schedules one guarded read');
+  const count = f.requests.length;
+  f.emit(protocol.BridgeMessageType.ModelProfileScopeSnapshot, peer);
+  f.emit(protocol.BridgeMessageType.ModelProfileScopeSnapshot, { ...peer, authorityId: 'foreign', sequence: 99 });
+  f.emit(protocol.BridgeMessageType.ModelProfileScopeSnapshot, { ...peer, scopeId: 'inactive', sequence: 99 });
+  assert.equal(f.requests.length, count);
+});
+
+test('inherit receipt validates explicit boolean and preserves current thinking', () => {
+  const f = fixture(); f.read('a');
+  f.store.setChildThinkingInheritance('a', model, true); const request = f.requests.at(-1);
+  assert.deepEqual(JSON.parse(JSON.stringify(f.store.thinkingFor('conversation', 'a'))), { kind: 'openai-effort', value: 'low' });
+  const ack = { ...snapshot('a', 'low', 2), outcome: 'committed' };
+  ack.profile.inheritThinkingToChildren = true;
+  f.reply(request, ack);
+  assert.equal(f.store.pendingFor('conversation', 'a'), undefined);
+  assert.equal(f.store.childThinkingInheritanceFor('conversation', 'a'), true);
+});

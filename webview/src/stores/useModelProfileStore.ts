@@ -27,6 +27,7 @@ const sameScope = (link: ModelProfileScopeLinkRecord, scope: Scope): boolean => 
 
 export const useModelProfileStore = defineStore('modelProfile', {
   state: () => ({ status: '', authorityId: '', adoptionRequestId: '', invalidationFingerprint: '',
+    invalidationSequences: {} as Record<string, number>,
     scopeErrors: {} as Record<string, string>,
     observations: {} as Record<string, ModelProfileScopeSnapshotPayload>,
     activeScopes: {} as Record<string, { scope: Scope; users: number }>,
@@ -78,6 +79,7 @@ export const useModelProfileStore = defineStore('modelProfile', {
         ...(input.inheritThinkingToChildren !== undefined || saved?.profile?.inheritThinkingToChildren !== undefined
           ? { inheritThinkingToChildren: input.inheritThinkingToChildren ?? saved?.profile?.inheritThinkingToChildren }
           : {}),
+        ...(operation === 'inherit' && (prior?.profile ?? saved?.profile)?.thinkingOverride ? { thinkingOverride: plainThinking((prior?.profile ?? saved?.profile)!.thinkingOverride!) } : {}),
         ...(operation === 'thinking' && input.thinkingOverride ? { thinkingOverride: plainThinking(input.thinkingOverride) } : {}) };
       this.pendingSelections[key] = { requestId: prior?.requestId ?? '', profile, operation,
         ...(input.expectedEffectiveModel ? { expectedEffectiveModel: plainModel(input.expectedEffectiveModel) } : {}),
@@ -133,14 +135,15 @@ export const useModelProfileStore = defineStore('modelProfile', {
       const isRead = !!correlationId && read?.requestId === correlationId;
       const isWrite = !!correlationId && pending?.requestId === correlationId;
       const previousObservation = this.observations[key];
-      // Uncorrelated host broadcasts are invalidations only: accept them for an active target
-      // with the same authority and a newer sequence, never as a local write acknowledgement.
-      const isBroadcast = !correlationId
-        && !!this.activeScopes[key]
-        && !!this.authorityId
-        && payload.authorityId === this.authorityId
-        && (!previousObservation || payload.sequence > previousObservation.sequence);
-      if (!isRead && !isWrite && !isBroadcast) return;
+      if (!correlationId) {
+        if (!this.activeScopes[key] || !this.authorityId || payload.authorityId !== this.authorityId
+          || !Number.isSafeInteger(payload.sequence) || !payload.revision || payload.outcome !== 'committed'
+          || payload.sequence <= Math.max(previousObservation?.sequence ?? 0, this.invalidationSequences[key] ?? 0)) return;
+        this.invalidationSequences[key] = payload.sequence;
+        this.refreshScope(payload.scopeKind, payload.scopeId);
+        return;
+      }
+      if (!isRead && !isWrite) return;
       if (isRead) delete this.reads[key];
       // An after-read belongs to one submitted operation, not a newer queued selection that
       // started while the host was reading. It must not detach that newer in-flight request.
@@ -151,11 +154,12 @@ export const useModelProfileStore = defineStore('modelProfile', {
         if (pending) { pending.status = 'uncertain'; pending.error = this.status; settle(key, this.status); }
         return;
       }
+      if (isRead && read.sessionId && read.sessionId !== payload.sessionId) return;
       if (isWrite && (previousObservation?.sessionId !== payload.sessionId || payload.authorityId !== this.authorityId)) return;
       const actual = payload.profile;
       const validPair = actual && payload.link?.modelProfileId === actual.id && sameScope(payload.link, scopeOf(payload.scopeKind, payload.scopeId));
       const actualState = !actual && !payload.link ? 'absent' : validPair ? actual.thinkingOverride ? 'overridden' : 'default' : undefined;
-      if (!actualState || payload.profileState !== actualState || payload.outcome !== (isWrite || isBroadcast ? 'committed' : 'observed')) {
+      if (!actualState || payload.profileState !== actualState || payload.outcome !== (isWrite ? 'committed' : 'observed')) {
         const message = '配置确认状态不完整；结果未确定，请重新读取。';
         this.scopeErrors[key] = message;
         if (isWrite) this.rejectPending(correlationId, message);
@@ -167,6 +171,8 @@ export const useModelProfileStore = defineStore('modelProfile', {
         const matches = sent && payload.operation === sent.operation && payload.expectedRevision === sent.expectedRevision
           && (sent.operation === 'clear' ? actualState === 'absent'
             : sent.operation === 'reset' ? sent.profile.inheritModel ? actualState === 'absent' : actualState === 'default' && sameModel && !actual?.inheritModel
+            : sent.operation === 'inherit' ? sameModel && actual?.inheritThinkingToChildren === sent.profile.inheritThinkingToChildren
+              && JSON.stringify(actual?.thinkingOverride) === JSON.stringify(sent.profile.thinkingOverride)
             : sameModel && (sent.operation === 'select' ? actualState === 'default' && !actual?.inheritModel
               : actualState === 'overridden' && !!actual?.inheritModel === !!sent.profile.inheritModel && JSON.stringify(actual?.thinkingOverride) === JSON.stringify(sent.profile.thinkingOverride)));
         if (!matches) { this.rejectPending(correlationId, '保存确认内容不匹配；结果未确定，请重新读取。'); return; }
@@ -179,7 +185,6 @@ export const useModelProfileStore = defineStore('modelProfile', {
         this.authorityId = payload.authorityId; this.observations = {};
         const client = useClientStateStore(); client.modelProfiles = []; client.modelProfileScopeLinks = [];
       }
-      if (isBroadcast && previousObservation?.sessionId && previousObservation.sessionId !== payload.sessionId) return;
       if (isRead && read.authorityId && read.authorityId !== payload.authorityId) return;
       if (isRead && read.afterRequestId && payload.afterRequestId !== read.afterRequestId) return;
       if (isRead && read.adopt && previousObservation && previousObservation.sessionId !== payload.sessionId && this.pendingSelections[key]) {

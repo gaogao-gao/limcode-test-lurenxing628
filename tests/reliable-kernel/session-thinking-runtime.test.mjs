@@ -145,7 +145,7 @@ for (const inheritedScope of ['agent', 'workflow']) test(`review scope actual co
       assert.equal(effective.providerConfigId, provider.id); assert.equal(effective.model, provider.model);
       // The same effective identity is passed by Composer to this production script-setup.
       const control = ui.control(provider, effective.model);
-      assert.equal(control.defaultLabel.value, '1024 tokens');
+      assert.equal(control.defaultLabel.value, '模型默认');
       control.save('2048');
       await ui.store.awaitSavedForScope('conversation', 'parent');
       const saved = ui.store.confirmedFor('conversation', 'parent');
@@ -374,17 +374,18 @@ for (const target of clearAckTargets) test(`review scope clear receipt is channe
       await saved(() => ui.control(f.provider, f.provider.model).save('high'));
       const selected = await saved(() => ui.store.setProfileForScope('conversation', 'parent', identity));
       assert.equal(selected.profile.thinkingOverride, undefined, 'model switch clears old OpenAI effort');
-      const status = ui.status(), control = ui.control(provider, provider.model);
+      const control = ui.control(provider, provider.model);
+      const resetCurrent = () => ui.store.setThinkingForScope('parent', ui.store.effectiveFor('conversation', 'parent'), null);
       if (target.value) await saved(() => control.save(target.value));
-      else { assert.equal(control.capability.value, undefined); assert.ok(status.effective.value, 'public recovery does not depend on thinking capability'); }
-      const reset = await saved(() => status.reset());
+      else { assert.equal(control.capability.value, undefined); assert.ok(ui.store.effectiveFor('conversation', 'parent'), 'guarded reset does not depend on thinking capability'); }
+      const reset = await saved(resetCurrent);
       assert.equal(reset.profile.providerConfigId, provider.id, 'reset preserves explicit selected model');
       assert.equal(reset.profile.thinkingOverride, undefined);
       await f.configuration.mutations.setModelProfile({ scopeKind: 'agent', scopeId: f.agent.id, ...identity });
       const cleared = await saved(() => ui.store.clearProfileScope('conversation', 'parent'));
       assert.equal(cleared.profile, undefined); assert.equal(cleared.link, undefined);
       assert.deepEqual(cleared.effectiveModel, identity);
-      assert.equal(status.pending.value, undefined);
+      assert.equal(ui.store.pendingFor('conversation', 'parent'), undefined);
       const staleDraft = { scopeKind: 'conversation', scopeId: 'parent', ...identity, authorityId: cleared.authorityId, sessionId: cleared.sessionId,
         expectedRevision: cleared.revision, operation: 'thinking', expectedEffectiveModel: { providerConfigId: f.provider.id, provider: f.provider.provider, model: f.provider.model }, thinkingOverride: { kind: 'openai-effort', value: 'high' } };
       channel.send('old-model-after-clear', channel.T.ModelProfileScopeSet, staleDraft);
@@ -401,7 +402,7 @@ for (const target of clearAckTargets) test(`review scope clear receipt is channe
         assert.deepEqual(ui.requests.at(-1).payload.expectedEffectiveModel, identity);
         assert.equal(inherited.profile.providerConfigId, provider.id);
       } else {
-        const absentReset = await saved(() => status.reset());
+        const absentReset = await saved(resetCurrent);
         assert.equal(absentReset.profile, undefined, 'unsupported reset confirms absence, never creates an invalid override');
       }
       assert.equal((await f.app.agentLoop.runInput(f.input(`clear-channel-${target.model}`))).terminalStatus, 'completed');
