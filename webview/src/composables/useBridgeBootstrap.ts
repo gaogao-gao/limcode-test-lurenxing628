@@ -67,16 +67,22 @@ export function useBridgeBootstrap(): void {
     }),
     bridge.on(BridgeMessageType.ConfigurationSnapshot, (message) => {
       if (!message.payload) return;
+      modelProfiles.invalidateSnapshot(message.payload.state);
       clientState.applyConfigurationSnapshot(message.payload.state);
-      modelProfiles.reconcileSnapshot(message.correlationId);
       systemPrompts.reconcilePendingSave();
       runtimeContexts.reconcilePendingSave();
+    }),
+    bridge.on(BridgeMessageType.ModelProfileScopeSnapshot, (message) => {
+      if (message.payload) modelProfiles.applyScopeSnapshot(message.payload, message.correlationId);
     }),
     bridge.on(BridgeMessageType.InteractionResult, (message) => {
       if (message.payload) interactions.applyResult(message.payload, message.correlationId);
     }),
     bridge.on(BridgeMessageType.GlobalSettingsSnapshot, (message) => {
-      if (message.payload) globalSettings.applySnapshot(message.payload, message.correlationId);
+      if (message.payload) {
+        globalSettings.applySnapshot(message.payload, message.correlationId);
+        if (message.payload.section === 'llm' || message.payload.section === 'llmProviderConfigs') modelProfiles.invalidateActiveScopes();
+      }
     }),
     bridge.on(BridgeMessageType.GlobalSettingsFlush, (message) => {
       void globalSettings.flushForExecution().then(
