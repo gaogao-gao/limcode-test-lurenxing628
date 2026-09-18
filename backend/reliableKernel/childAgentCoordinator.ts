@@ -1383,7 +1383,8 @@ export class ReliableChildAgentCoordinator {
     });
     await this.dependencies.modelProfiles.initializeConversation({
       conversationId: spawned.childConversationId,
-      model: spawned.modelSelection
+      model: spawned.modelSelection,
+      ...(inheritedThinkingOverride ? { thinkingOverride: inheritedThinkingOverride } : {})
     });
     if (spawned.answerBridgeId !== answerBridgeId) {
       throw new Error('ChildExecution returned an unexpected AnswerBridge identity.');
