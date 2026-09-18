@@ -88,7 +88,7 @@ async function fixture(run, hooks = {}) {
     const list = async (domain, where = {}) => (await app.database.snapshotAll(kernel.DOMAIN_REPOSITORIES.domain(domain).list({ where, orderBy: { column: 'id', direction: 'asc' }, limit: 100 }))).snapshot;
     coordinator = new ReliableChildAgentCoordinator({ database: app.database, ...app.runtime, modelProvider: app.modelProvider, turns: app.turns, agentLoop: app.agentLoop,
       agents: { async resolve() { return { agentId: childAgent.id, agentType: 'worker' }; } },
-      modelProfiles: { initializeConversation: ({ conversationId, model }) => configuration.mutations.initializeConversationModelProfile({ conversationId, ...model }) }
+      modelProfiles: { initializeConversation: ({ conversationId, model, thinkingOverride }) => configuration.mutations.initializeConversationModelProfile({ conversationId, ...model, ...(thinkingOverride ? { thinkingOverride } : {}) }) }
     });
     const now = new Date().toISOString();
     await app.database.transaction([
@@ -490,11 +490,13 @@ test('勾选子继承时，实际 child generation 使用父会话当前有效 t
     assert.ok(childWires.length, 'child must issue an actual provider request');
     assert.ok(childWires.every(wire => wire.body.reasoning_effort === 'high'));
   }, {
-    async send(request, controls) {
+    async send(request, controls, f) {
+      const firstParentRequest = request.conversationId === 'parent'
+        && f.requests.filter(item => item.conversationId === 'parent').length === 1;
       await controls.onEvent({
         kind: 'completed',
         streamSeq: '1',
-        content: { role: 'model', parts: [request.conversationId === 'parent'
+        content: { role: 'model', parts: [firstParentRequest
           ? { id: 'inherit-child', functionCall: { name: 'run_agent', args: { prompt: 'inherit thinking' } } }
           : { text: 'done' }] }
       });
