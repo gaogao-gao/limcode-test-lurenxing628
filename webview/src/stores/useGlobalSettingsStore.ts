@@ -1009,6 +1009,7 @@ const LLM_PROVIDER_CONFIGS_AUTOSAVE_DELAY_MS = 400;
 const LLM_COMPRESSION_CONFIGS_AUTOSAVE_DELAY_MS = 400;
 const SETTINGS_SAVE_ACK_TIMEOUT_MS = 5_000;
 const SETTINGS_FLUSH_TIMEOUT_MS = 12_000;
+const SETTINGS_LOAD_TIMEOUT_MS = 8_000; // 单 section 加载超时，防止丢包导致永久卡死
 let llmProviderConfigsAutoSaveTimer: number | undefined;
 let llmCompressionConfigsAutoSaveTimer: number | undefined;
 
@@ -1220,7 +1221,7 @@ export const useGlobalSettingsStore = defineStore('globalSettings', {
         });
       }
     },
-    flushForExecution(): Promise<void> {
+    flushForExecution(sections = CHANNEL_SETTINGS_SECTIONS): Promise<void> {
       if (llmProviderConfigsAutoSaveTimer !== undefined) this.saveLlmProviderConfigs();
       if (llmCompressionConfigsAutoSaveTimer !== undefined) this.saveLlmCompressionConfigs();
       return new Promise<void>((resolve, reject) => {
@@ -1231,16 +1232,32 @@ export const useGlobalSettingsStore = defineStore('globalSettings', {
           else resolve();
         };
         const check = () => {
-          for (const section of CHANNEL_SETTINGS_SECTIONS) {
+          // 仅在当前视图关心的 section 上检查外部冲突；聊天面板不因设置页脏输入而被阻塞。
+          for (const section of sections) {
             if (this.externalChangedSections[section] || this.failedSettingsSections[section]) {
-              finish(new Error(this.failedSettingsSections[section] || '设置有未处理的修改冲突，请先在设置页确认。'));
+              const message = this.failedSettingsSections[section]
+                ?? '设置有未处理的修改冲突，请先在设置页确认。';
+              console.warn('[LimCode] flushForExecution blocked by:', { section, loading: !!this.loadingSettingsSections[section], dirty: isSectionDirty(this, section), failed: !!this.failedSettingsSections[section], message });
+              finish(new Error(message));
               return;
             }
           }
-          if (CHANNEL_SETTINGS_SECTIONS.every((section) => !isSectionDirty(this, section) && !this.loadingSettingsSections[section])) finish();
+          // 仅等待当前视图关心的 section 收敛。
+          if (sections.every((section) => !isSectionDirty(this, section) && !this.loadingSettingsSections[section])) finish();
         };
         const unsubscribe = this.$subscribe(check, { detached: true, flush: 'sync' });
-        const timeout = window.setTimeout(() => finish(new Error('设置尚未确认保存，已暂停本次操作，请检查设置页。')), SETTINGS_FLUSH_TIMEOUT_MS);
+        const timeout = window.setTimeout(() => {
+          const blocked = sections
+            .map((section) => ({
+              section,
+              loading: !!this.loadingSettingsSections[section],
+              dirty: isSectionDirty(this, section),
+              failed: this.failedSettingsSections[section]
+            }))
+            .filter((item) => item.loading || item.dirty || item.failed);
+          console.warn('[LimCode] flushForExecution timeout; blocked by:', blocked);
+          finish(new Error('设置尚未确认保存，已暂停本次操作，请检查设置页。'));
+        }, SETTINGS_FLUSH_TIMEOUT_MS);
         check();
       });
     },

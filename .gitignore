@@ -1,4 +1,4 @@
-node_modules/
+﻿node_modules/
 dist/
 *.vsix
 .vscode-test/
@@ -97,6 +97,8 @@ docs/architecture/*
 !/tests/reliable-kernel/workspace-runtime-isolation.test.mjs
 !/tests/reliable-kernel/vscode-fs-local-read.test.cjs
 !/tests/reliable-kernel/claude-cross-model-thinking-replay.test.mjs
+!/tests/reliable-kernel/settings-flush-convergence.test.mjs
+!/tests/reliable-kernel/settings-save-barrier-detach.test.mjs
 !/tests/vscodeStorageJsonDurability.test.cjs
 !/webview/tests/
 /webview/tests/*

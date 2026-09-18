@@ -85,7 +85,10 @@ export function useBridgeBootstrap(): void {
       }
     }),
     bridge.on(BridgeMessageType.GlobalSettingsFlush, (message) => {
-      void globalSettings.flushForExecution().then(
+      const sections = session.viewKind === 'globalSettings'
+        ? CHANNEL_SETTINGS_SECTIONS
+        : ['llm'];
+      void globalSettings.flushForExecution(sections).then(
         () => bridge.request(BridgeMessageType.GlobalSettingsFlushResult, { status: 'saved' }, { correlationId: message.id }),
         (error: unknown) => bridge.request(BridgeMessageType.GlobalSettingsFlushResult, {
           status: 'failed', message: error instanceof Error ? error.message : String(error)
