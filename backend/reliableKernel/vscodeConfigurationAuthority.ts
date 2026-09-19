@@ -1,4 +1,4 @@
-import { SessionThinkingReadCache } from './sessionThinkingReadCache';
+﻿import { SessionThinkingReadCache } from './sessionThinkingReadCache';
 import { createStorageRevision } from '../capabilities/vscodeStorage/storageRevision';
 import { hasThinkingBodyConflict } from '../../shared/sessionThinkingBody';
 import { applySessionThinkingOverride, validateSessionThinkingOverride } from '../../shared/sessionThinking';

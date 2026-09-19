@@ -1,4 +1,4 @@
-import type { TurnExecutionPhase, TurnLifecycleStatus } from './turnLifecycle';
+﻿import type { TurnExecutionPhase, TurnLifecycleStatus } from './turnLifecycle';
 import type { NativeSteeringReceipt, OpenAIResponsesNativeSettings } from './openAIResponsesNative';
 import type { DebugCaptureSettings, DebugCaptureCommand, DebugCaptureResult, DebugCaptureUiBatch, DebugCaptureUiAck } from './debugCapture';
 import type {

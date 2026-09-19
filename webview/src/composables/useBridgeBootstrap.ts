@@ -7,7 +7,7 @@ import {
 import { bridge, BridgeMessageType } from '@webview/transport';
 import { useSessionStore } from '@webview/stores/useSessionStore';
 import { useClientStateStore } from '@webview/stores/useClientStateStore';
-import { useGlobalSettingsStore } from '@webview/stores/useGlobalSettingsStore';
+import { useGlobalSettingsStore, CHANNEL_SETTINGS_SECTIONS } from '@webview/stores/useGlobalSettingsStore';
 import { useConversationSettingsStore } from '@webview/stores/useConversationSettingsStore';
 import { useSystemPromptStore } from '@webview/stores/useSystemPromptStore';
 import { useRuntimeContextStore } from '@webview/stores/useRuntimeContextStore';
@@ -85,7 +85,10 @@ export function useBridgeBootstrap(): void {
       }
     }),
     bridge.on(BridgeMessageType.GlobalSettingsFlush, (message) => {
-      void globalSettings.flushForExecution().then(
+      const sections: readonly GlobalSettingsSection[] = session.viewKind === 'globalSettings'
+        ? CHANNEL_SETTINGS_SECTIONS
+        : ['llm'];
+      void globalSettings.flushForExecution(sections).then(
         () => bridge.request(BridgeMessageType.GlobalSettingsFlushResult, { status: 'saved' }, { correlationId: message.id }),
         (error: unknown) => bridge.request(BridgeMessageType.GlobalSettingsFlushResult, {
           status: 'failed', message: error instanceof Error ? error.message : String(error)

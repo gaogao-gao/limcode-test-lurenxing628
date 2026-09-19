@@ -1,4 +1,4 @@
-import { ModelProfileMutationCompletions, modelProfileCompletionKey } from './ModelProfileMutationCompletions';
+﻿import { ModelProfileMutationCompletions, modelProfileCompletionKey } from './ModelProfileMutationCompletions';
 import type { ModelProfileScopeReadPayload, ModelProfileScopeSetPayload, ModelProfileScopeSnapshotPayload } from '../../../shared/protocol';
 
 import { createHash, randomUUID } from 'node:crypto';

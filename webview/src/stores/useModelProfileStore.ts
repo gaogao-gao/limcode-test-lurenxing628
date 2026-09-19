@@ -1,4 +1,4 @@
-import { defineStore } from 'pinia';
+﻿import { defineStore } from 'pinia';
 import { type ConfigScopeKind, type ChatModelOverrideRecord, type LlmProviderKind, type ModelProfileRecord, type ModelProfileScopeLinkRecord, type ModelProfileScopeSnapshotPayload, type SessionThinkingOverride } from '@shared/protocol';
 import { bridge, BridgeMessageType } from '@webview/transport';
 import { useClientStateStore } from './useClientStateStore';

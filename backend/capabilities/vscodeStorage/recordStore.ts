@@ -56,6 +56,15 @@ export interface CommitRecordStoreSnapshotOptions extends SaveRecordStoreOptions
   section: string;
 }
 
+export interface UpsertRecordOptions {
+  /** 记录的显示名称，用于生成可读文件名。 */
+  labelForRecord: (record: { id: string }) => string;
+  /** 保存时预期当前 revision；若不匹配则拒绝写入。 */
+  expectedRevision: string;
+  /** 冲突时报错用的 section 名称。 */
+  section: string;
+}
+
 const LOAD_RECORD_BATCH_SIZE = 32;
 const RECORD_STORE_LOCK_STALE_MS = 30_000;
 // A full-store generation save can legitimately exceed a couple of seconds on remote or busy
@@ -195,6 +204,62 @@ export async function commitRecordStoreSnapshot<TRecord extends { id: string }, 
       revision: createStorageRevision(records),
       previousRecords: current?.records ?? []
     };
+  });
+}
+
+/**
+ * 增量更新单条记录：只写变更的 record 文件，更新 index 中的 updatedAt，递增 revision。
+ *
+ * 使用场景：用户在设置页修改单个 model-profile，不需要全量重写 847 条记录。
+ */
+export async function upsertRecord<TRecord extends { id: string }, TKey extends string>(
+  root: vscode.Uri,
+  indexUri: vscode.Uri,
+  record: TRecord,
+  recordKey: TKey,
+  options: UpsertRecordOptions
+): Promise<RecordStoreSnapshot<TRecord>> {
+  return withRecordStoreMutationLock(indexUri, async () => {
+    const current = await loadRecordStoreSnapshotUnlocked<TRecord, TKey>(root, indexUri, recordKey);
+    const actualRevision = current?.revision ?? missingRecordStoreRevision(indexUri);
+    if (actualRevision !== options.expectedRevision) {
+      throw new SettingsRevisionConflictError(options.section, options.expectedRevision, actualRevision);
+    }
+
+    const savedAt = new Date().toISOString();
+    const previousIndex = await loadRecordsIndex(indexUri, false);
+    const previousRecords = previousIndex?.records ?? [];
+    const previousById = new Map(previousRecords.map((r) => [r.id, r]));
+
+    // 只写这一条记录的文件
+    const file = previousById.get(record.id)?.file ?? 
+      `${RECORDS_DIR}/${sortableName(record.id, options.labelForRecord(record))}.json`;
+    
+    const recordsRoot = vscode.Uri.joinPath(root, RECORDS_DIR);
+    await vscode.workspace.fs.createDirectory(recordsRoot);
+    await writeJson(vscode.Uri.joinPath(root, ...file.split('/')), {
+      schemaVersion: STORAGE_VERSION,
+      savedAt,
+      [recordKey]: record
+    } as RecordFile<TKey, TRecord>);
+
+    // 更新 index：替换或新增该记录的 updatedAt
+    const nextIndexRecords = previousRecords
+      .filter((r) => r.id !== record.id)
+      .concat([{ id: record.id, file, updatedAt: savedAt }]);
+
+    await writeJson(indexUri, {
+      schemaVersion: STORAGE_VERSION,
+      savedAt,
+      records: nextIndexRecords
+    } satisfies RecordsIndexFile);
+
+    // 返回新的 snapshot（必须重新读取才能生成正确的 revision）
+    const updated = await loadRecordStoreSnapshotUnlocked<TRecord, TKey>(root, indexUri, recordKey);
+    if (!updated) {
+      throw new Error(`Failed to reload record store after upsert: ${indexUri.fsPath}`);
+    }
+    return updated;
   });
 }
 
