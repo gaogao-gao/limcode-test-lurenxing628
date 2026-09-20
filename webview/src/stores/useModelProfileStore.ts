@@ -16,7 +16,7 @@ interface PendingModelProfileSelection {
   error?: string;
 }
 interface Scope { scopeKind: ConfigScopeKind; scopeId?: string }
-interface ReadState { requestId: string; authorityId?: string; sessionId?: string; afterRequestId?: string; discard: boolean; adopt: boolean; dirty: boolean }
+interface ReadState { requestId: string; authorityId?: string; sessionId?: string; afterRequestId?: string; discard: boolean; adopt: boolean; renew: boolean; dirty: boolean }
 const waiters = new Map<string, Array<{ resolve: () => void; reject: (error: Error) => void }>>();
 function settle(key: string, error?: string): void { for (const waiter of waiters.get(key) ?? []) error ? waiter.reject(new Error(error)) : waiter.resolve(); waiters.delete(key); }
 const scopeOf = (scopeKind: ConfigScopeKind, scopeId?: string): Scope => ({ scopeKind, ...(scopeKind !== 'global' && scopeId?.trim() ? { scopeId: scopeId.trim() } : {}) });
@@ -25,10 +25,31 @@ const plainModel = (value: ChatModelOverrideRecord): ChatModelOverrideRecord => 
 const plainThinking = (value: SessionThinkingOverride): SessionThinkingOverride => 'tokens' in value ? { kind: value.kind, tokens: value.tokens } : { kind: value.kind, value: value.value };
 const sameScope = (link: ModelProfileScopeLinkRecord, scope: Scope): boolean => link.scopeKind === scope.scopeKind && (scope.scopeKind === 'global' || link.scopeId === scope.scopeId);
 
+function matchesReceipt(payload: ModelProfileScopeSnapshotPayload, sent: PendingModelProfileSelection['submitted']): boolean {
+  if (!sent || payload.operation !== sent.operation || payload.expectedRevision !== sent.expectedRevision) return false;
+  const actual = payload.profile;
+  const sameModel = !!actual && JSON.stringify(plainModel(actual)) === JSON.stringify(plainModel(sent.profile));
+  switch (sent.operation) {
+    case 'clear': return payload.profileState === 'absent';
+    case 'reset':
+      if (sent.profile.inheritModel && !sent.profile.inheritThinkingToChildren) return payload.profileState === 'absent';
+      return payload.profileState === 'default' && sameModel
+        && !!actual?.inheritModel === !!sent.profile.inheritModel
+        && !!actual?.inheritThinkingToChildren === !!sent.profile.inheritThinkingToChildren;
+    case 'inherit': return sameModel && actual?.inheritThinkingToChildren === sent.profile.inheritThinkingToChildren
+      && JSON.stringify(actual?.thinkingOverride) === JSON.stringify(sent.profile.thinkingOverride);
+    case 'select': return payload.profileState === 'default' && sameModel && !actual?.inheritModel;
+    case 'thinking': return payload.profileState === 'overridden' && sameModel
+      && !!actual?.inheritModel === !!sent.profile.inheritModel
+      && JSON.stringify(actual?.thinkingOverride) === JSON.stringify(sent.profile.thinkingOverride);
+  }
+}
+
 export const useModelProfileStore = defineStore('modelProfile', {
   state: () => ({ status: '', authorityId: '', adoptionRequestId: '', invalidationFingerprint: '',
     invalidationSequences: {} as Record<string, number>,
     scopeErrors: {} as Record<string, string>,
+    failedReads: {} as Record<string, boolean>,
     observations: {} as Record<string, ModelProfileScopeSnapshotPayload>,
     activeScopes: {} as Record<string, { scope: Scope; users: number }>,
     reads: {} as Record<string, ReadState>,
@@ -63,7 +84,10 @@ export const useModelProfileStore = defineStore('modelProfile', {
       this.choose('conversation', conversationId, { ...plainModel(model), inheritThinkingToChildren: enabled, expectedEffectiveModel: plainModel(model) }, 'inherit');
     },
     thinkingFor(scopeKind: ConfigScopeKind, scopeId?: string): SessionThinkingOverride | undefined {
-      return this.localProfileFor(scopeKind, scopeId).profile?.thinkingOverride;
+      const profile = this.localProfileFor(scopeKind, scopeId).profile;
+      const effective = this.effectiveFor(scopeKind, scopeId);
+      return profile && effective && JSON.stringify(plainModel(profile)) === JSON.stringify(plainModel(effective))
+        ? profile.thinkingOverride : undefined;
     },
     childThinkingInheritanceFor(scopeKind: ConfigScopeKind, scopeId?: string): boolean {
       return this.localProfileFor(scopeKind, scopeId).profile?.inheritThinkingToChildren === true;
@@ -79,7 +103,7 @@ export const useModelProfileStore = defineStore('modelProfile', {
         ...(input.inheritThinkingToChildren !== undefined || saved?.profile?.inheritThinkingToChildren !== undefined
           ? { inheritThinkingToChildren: input.inheritThinkingToChildren ?? saved?.profile?.inheritThinkingToChildren }
           : {}),
-        ...(operation === 'inherit' && (prior?.profile ?? saved?.profile)?.thinkingOverride ? { thinkingOverride: plainThinking((prior?.profile ?? saved?.profile)!.thinkingOverride!) } : {}),
+        ...(operation === 'inherit' && this.thinkingFor(scopeKind, scopeId) ? { thinkingOverride: plainThinking(this.thinkingFor(scopeKind, scopeId)!) } : {}),
         ...(operation === 'thinking' && input.thinkingOverride ? { thinkingOverride: plainThinking(input.thinkingOverride) } : {}) };
       this.pendingSelections[key] = { requestId: prior?.requestId ?? '', profile, operation,
         ...(input.expectedEffectiveModel ? { expectedEffectiveModel: plainModel(input.expectedEffectiveModel) } : {}),
@@ -113,20 +137,21 @@ export const useModelProfileStore = defineStore('modelProfile', {
     refreshScope(scopeKind: ConfigScopeKind, scopeId?: string, options: { discard?: boolean; adoptRoot?: boolean } = {}): void {
       const key = keyOf(scopeKind, scopeId), pending = this.pendingSelections[key];
       const existing = this.reads[key];
-      if (existing) { existing.dirty = true; existing.discard ||= options.discard === true; return; }
+      if (existing && !options.adoptRoot) { existing.dirty = true; existing.discard ||= options.discard === true; return; }
       const adopt = options.adoptRoot === true || !this.authorityId;
       const afterRequestId = !options.adoptRoot && pending?.requestId ? pending.requestId : undefined;
       const sessionId = !options.adoptRoot ? this.observations[key]?.sessionId : undefined;
       const requestId = bridge.request(BridgeMessageType.ModelProfileScopeRead, { ...scopeOf(scopeKind, scopeId),
         ...(sessionId ? { sessionId } : {}), ...(options.adoptRoot ? { renewSession: true } : {}),
         ...(!adopt && this.authorityId ? { authorityId: this.authorityId } : {}), ...(afterRequestId ? { afterRequestId } : {}) });
-      this.reads[key] = { requestId, sessionId, ...(adopt ? {} : { authorityId: this.authorityId }), afterRequestId, discard: options.discard === true, adopt, dirty: false };
+      this.reads[key] = { requestId, sessionId, ...(adopt ? {} : { authorityId: this.authorityId }), afterRequestId, discard: options.discard === true, adopt, renew: options.adoptRoot === true, dirty: false };
       if (adopt) this.adoptionRequestId = requestId;
       setTimeout(() => {
         if (this.reads[key]?.requestId !== requestId) return;
         delete this.reads[key];
         this.status = '读取未确认；保留草稿，请重新读取。';
         this.scopeErrors[key] = this.status;
+        this.failedReads[key] = true;
         if (this.pendingSelections[key]) this.rejectPending(this.pendingSelections[key].requestId, this.status);
       }, 10000);
     },
@@ -151,6 +176,7 @@ export const useModelProfileStore = defineStore('modelProfile', {
       if (payload.outcome === 'uncertain' || !payload.revision || !payload.authorityId || !payload.sessionId) {
         this.status = payload.error || '结果未确定，请重新读取。';
         this.scopeErrors[key] = this.status;
+        if (isRead) this.failedReads[key] = true;
         if (pending) { pending.status = 'uncertain'; pending.error = this.status; settle(key, this.status); }
         return;
       }
@@ -166,16 +192,7 @@ export const useModelProfileStore = defineStore('modelProfile', {
         return;
       }
       if (isWrite) {
-        const sent = pending?.submitted;
-        const sameModel = actual && sent && JSON.stringify(plainModel(actual)) === JSON.stringify(plainModel(sent.profile));
-        const matches = sent && payload.operation === sent.operation && payload.expectedRevision === sent.expectedRevision
-          && (sent.operation === 'clear' ? actualState === 'absent'
-            : sent.operation === 'reset' ? sent.profile.inheritModel ? actualState === 'absent' : actualState === 'default' && sameModel && !actual?.inheritModel
-            : sent.operation === 'inherit' ? sameModel && actual?.inheritThinkingToChildren === sent.profile.inheritThinkingToChildren
-              && JSON.stringify(actual?.thinkingOverride) === JSON.stringify(sent.profile.thinkingOverride)
-            : sameModel && (sent.operation === 'select' ? actualState === 'default' && !actual?.inheritModel
-              : actualState === 'overridden' && !!actual?.inheritModel === !!sent.profile.inheritModel && JSON.stringify(actual?.thinkingOverride) === JSON.stringify(sent.profile.thinkingOverride)));
-        if (!matches) { this.rejectPending(correlationId, '保存确认内容不匹配；结果未确定，请重新读取。'); return; }
+        if (!matchesReceipt(payload, pending?.submitted)) { this.rejectPending(correlationId, '保存确认内容不匹配；结果未确定，请重新读取。'); return; }
       }
       if (payload.authorityId !== this.authorityId) {
         if (!isRead || !read.adopt || this.adoptionRequestId !== correlationId) return;
@@ -187,7 +204,7 @@ export const useModelProfileStore = defineStore('modelProfile', {
       }
       if (isRead && read.authorityId && read.authorityId !== payload.authorityId) return;
       if (isRead && read.afterRequestId && payload.afterRequestId !== read.afterRequestId) return;
-      if (isRead && read.adopt && previousObservation && previousObservation.sessionId !== payload.sessionId && this.pendingSelections[key]) {
+      if (isRead && read.renew && this.pendingSelections[key]) {
         this.detachedDrafts[key] = this.pendingSelections[key]; delete this.pendingSelections[key];
         settle(key, '编辑会话已显式重建；旧草稿保留，未自动提交。');
       }
@@ -195,6 +212,7 @@ export const useModelProfileStore = defineStore('modelProfile', {
       if (before && payload.sequence <= before.sequence) return;
       // Only this guarded path updates profile/link consumers; full snapshots are invalidations.
       delete this.scopeErrors[key];
+      delete this.failedReads[key];
       this.observations[key] = payload;
       const client = useClientStateStore();
       const oldIds = new Set(client.modelProfileScopeLinks.filter(link => sameScope(link, scopeOf(payload.scopeKind, payload.scopeId))).map(link => link.modelProfileId));
@@ -221,12 +239,46 @@ export const useModelProfileStore = defineStore('modelProfile', {
       this.invalidateActiveScopes();
     },
     invalidateActiveScopes(): void { for (const active of Object.values(this.activeScopes)) this.refreshScope(active.scope.scopeKind, active.scope.scopeId); },
+    reconnectScopes(): void {
+      for (const [key, draft] of Object.entries(this.pendingSelections)) {
+        this.detachedDrafts[key] = draft;
+        settle(key, '连接已更换；未确认的草稿已保留，请核对当前配置。');
+      }
+      this.pendingSelections = {};
+      this.reads = {};
+      this.observations = {};
+      this.scopeErrors = {};
+      this.failedReads = {};
+      this.invalidationSequences = {};
+      this.authorityId = '';
+      this.adoptionRequestId = '';
+      const client = useClientStateStore();
+      client.modelProfiles = [];
+      client.modelProfileScopeLinks = [];
+      this.invalidateActiveScopes();
+    },
+    rejectRequest(correlationId: string | undefined, message: string): void {
+      if (!correlationId) return;
+      for (const [key, read] of Object.entries(this.reads)) {
+        if (read.requestId !== correlationId) continue;
+        delete this.reads[key];
+        this.scopeErrors[key] = message;
+        this.failedReads[key] = true;
+        this.status = message;
+        const pending = this.pendingSelections[key];
+        if (pending) { pending.status = 'uncertain'; pending.error = message; settle(key, message); }
+      }
+      this.rejectPending(correlationId, message);
+    },
     rejectPending(correlationId: string | undefined, message: string): void {
       if (!correlationId) return;
       for (const [key, pending] of Object.entries(this.pendingSelections)) if (pending.requestId === correlationId) { pending.status = 'uncertain'; pending.error = message; this.status = message; settle(key, message); }
     },
     retryPending(scopeKind: ConfigScopeKind, scopeId?: string): void {
       const pending = this.pendingFor(scopeKind, scopeId); if (!pending) return;
+      // A failed reconciliation read may belong to an expired editing session. Renew it
+      // explicitly, retaining the old draft without replaying an uncertain write.
+      if (this.failedReads[keyOf(scopeKind, scopeId)]) { this.refreshScope(scopeKind, scopeId, { adoptRoot: true }); return; }
       if (pending.status === 'uncertain' || pending.requestId) { this.refreshScope(scopeKind, scopeId); return; }
       delete pending.error; this.sendDraft(scopeKind, scopeId);
     },

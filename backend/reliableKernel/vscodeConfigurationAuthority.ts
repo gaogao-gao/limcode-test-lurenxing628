@@ -1,5 +1,6 @@
 ﻿import { SessionThinkingReadCache } from './sessionThinkingReadCache';
 import { createStorageRevision } from '../capabilities/vscodeStorage/storageRevision';
+import { loadScopedModelProfiles } from './scopedModelProfiles';
 import { hasThinkingBodyConflict } from '../../shared/sessionThinkingBody';
 import { applySessionThinkingOverride, validateSessionThinkingOverride } from '../../shared/sessionThinking';
 import type { RequestGenerationSettings } from './requestCompressionSettings';
@@ -170,7 +171,7 @@ export class VscodeConfigurationAuthority implements TurnAuthorityCompiler, Atta
     const pending = (async () => {
       // Fresh source reads preserve peer-Host and inherited-scope invalidation. Only concurrent
       // reads share IO; no timestamp/TTL can hide a provider or model authority revision.
-      const records = await this.loadModelSelectionRecords(capture.paths);
+      const records = await this.loadModelSelectionRecords(capture.paths, conversationId, executorAgentId);
       const { provider, modelId } = resolveModelSelection(records, {
         conversationId, executorAgentId, turnId: `model-profile-observation:${conversationId}`, intentKind: 'input'
       });
@@ -186,18 +187,24 @@ export class VscodeConfigurationAuthority implements TurnAuthorityCompiler, Atta
     return pending;
   }
 
-  private async loadModelSelectionRecords(paths: StoragePaths): Promise<ModelSelectionRecords> {
-    const [agents, workflows, modelProfiles, modelProfileScopeLinks, conversationWorkflowSelections, providers, selection] = await Promise.all([
+  private async loadModelSelectionRecords(paths: StoragePaths, conversationId: string, executorAgentId: string): Promise<ModelSelectionRecords> {
+    const [agents, workflows, conversationWorkflowSelections, providers, selection] = await Promise.all([
       loadRecordStore<AgentRecord, 'agent'>(paths.agentsRootUri, paths.agentsIndexUri, 'agent'),
       loadRecordStore<WorkflowRecord, 'workflow'>(paths.workflowsRootUri, paths.workflowsIndexUri, 'workflow'),
-      loadRecordStore<ModelProfileRecord, 'modelProfile'>(paths.modelProfilesRootUri, paths.modelProfilesIndexUri, 'modelProfile'),
-      loadRecordStore<ModelProfileScopeLinkRecord, 'link'>(paths.modelProfileScopeLinksRootUri, paths.modelProfileScopeLinksIndexUri, 'link'),
       loadRecordStore<ConversationWorkflowSelectionRecord, 'selection'>(paths.conversationWorkflowSelectionsRootUri, paths.conversationWorkflowSelectionsIndexUri, 'selection'),
       loadLlmProviderConfigsSettings(paths),
       loadGlobalSettingsFile(paths.settingsRootUri, 'llm')
     ]);
+    const selectedWorkflow = latestScopedSelection((conversationWorkflowSelections ?? []).filter(record =>
+      record.conversationId === conversationId && record.role === 'active'
+    ));
+    const scoped = await loadScopedModelProfiles(paths, [
+      { scopeKind: 'global' }, { scopeKind: 'agent', scopeId: executorAgentId },
+      ...(selectedWorkflow?.scopeKind === 'workflow' ? [{ scopeKind: 'workflow' as const, scopeId: selectedWorkflow.workflowId }] : []),
+      { scopeKind: 'conversation', scopeId: conversationId }
+    ]);
     return { agents: mergeAgentsWithBuiltins(agents ?? []), workflows: mergeWorkflowsWithBuiltins(workflows ?? []),
-      modelProfiles: modelProfiles ?? [], modelProfileScopeLinks: modelProfileScopeLinks ?? [],
+      ...scoped,
       conversationWorkflowSelections: conversationWorkflowSelections ?? [], providerConfigs: providers.settings.configs,
       activeProviderConfigId: (selection.settings as LlmSettingsRecord).activeProviderConfigId };
   }
@@ -954,8 +961,12 @@ export class VscodeConfigurationAuthority implements TurnAuthorityCompiler, Atta
   }
 
   public async loadRequestGenerationSettings(model: ChatModelOverrideRecord, conversationId: string): Promise<RequestGenerationSettings> {
-    const records = await this.loadRecords();
-    const provider = records.providerConfigs.find((item) => item.id === model.providerConfigId);
+    const paths = this.getPaths();
+    const [records, providers] = await Promise.all([
+      loadScopedModelProfiles(paths, [{ scopeKind: 'conversation', scopeId: conversationId }]),
+      loadLlmProviderConfigsSettings(paths)
+    ]);
+    const provider = providers.settings.configs.find((item) => item.id === model.providerConfigId);
     if (!provider || provider.provider !== model.provider || !providerContainsModel(provider, model.model)) throw new Error('当前请求渠道或模型已改变，请重新选择。');
     // Resolve only this conversation. Agent/workflow/global profiles and parent Turn fallbacks
     // select model identity, never a parent's session-only override.

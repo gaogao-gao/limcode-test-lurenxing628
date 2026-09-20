@@ -70,6 +70,17 @@ test('Responses HTTP/WS high → 默认省略，快照空对象不能回读实�
   }
 });
 
+test('渠道已配置的兼容型号复用参数定义，保存后的真实wire保留所选等级', async () => {
+  for (const [provider, model] of [['openai-compatible', 'gpt-5.6-terra'], ['openai-responses', 'relay-reasoner'], ['claude', 'relay-claude']]) {
+    const defaults = { thinkingConfig: { thinkingLevel: 'high' } };
+    const override = { kind: provider === 'claude' ? 'claude-effort' : 'openai-effort', value: 'medium' };
+    assert.ok(capability(provider, model, undefined, defaults.thinkingConfig).values.includes('medium'));
+    validate(override, provider, model, defaults);
+    const body = await ordinaryWire(provider, model, apply(defaults, override));
+    assert.equal(provider === 'claude' ? body.output_config.effort : provider === 'openai-responses' ? body.reasoning.effort : body.reasoning_effort, 'medium');
+  }
+});
+
 test('能力负例与特殊值：未知不猜测、格式不等价、合法范围和输出限制', () => {
   assert.equal(capability('openai-compatible', 'relay-custom-model'), undefined);
   assert.equal(capability('openai-compatible', 'gpt-4o'), undefined);

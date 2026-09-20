@@ -1,6 +1,7 @@
 ﻿import { createStorageRevision } from '../capabilities/vscodeStorage/storageRevision';
 import type { ChatModelOverrideRecord, ModelProfileScopeMutationReceipt, ModelProfileScopeSnapshotPayload, ModelProfileScopeReadPayload, SessionThinkingOverride, SystemPromptScopeSetPayload } from '../../shared/protocol';
 import { hasThinkingBodyConflict } from '../../shared/sessionThinkingBody';
+import { loadScopedModelProfiles } from './scopedModelProfiles';
 import { validateSessionThinkingOverride } from '../../shared/sessionThinking';
 import { loadLlmProviderConfigsSettings } from '../capabilities/vscodeStorage/llmProviderConfigs';
 import { randomUUID } from 'node:crypto';
@@ -135,8 +136,7 @@ export class VscodeConfigurationMutations {
   }
 
   private async modelProfilePair(paths: StoragePaths, scope: ScopeRef): Promise<{ profile?: ModelProfileRecord; link?: ModelProfileScopeLinkRecord; revision: string }> {
-    const [profiles, links] = await Promise.all([loadStore(modelProfileStore(paths)), loadStore(modelProfileLinkStore(paths))]);
-    const active = links.filter(link => scopeMatches(link, scope));
+    const { modelProfiles: profiles, modelProfileScopeLinks: active } = await loadScopedModelProfiles(paths, [scope]);
     if (active.length > 1) throw new Error('ModelProfile scope 存在多个 active link。');
     const link = active[0];
     const profile = link ? profiles.find(item => item.id === link.modelProfileId) : undefined;
@@ -146,10 +146,19 @@ export class VscodeConfigurationMutations {
 
   private async modelProfileObservation(capture: ModelProfileRootCapture, scope: ScopeRef, effective?: () => Promise<ChatModelOverrideRecord | undefined>, receipt?: ModelProfileScopeMutationReceipt): Promise<ModelProfileScopeSnapshotPayload> {
     const pair = await this.modelProfilePair(capture.paths, scope);
-    const effectiveModel = await effective?.();
+    let effectiveModel: ChatModelOverrideRecord | undefined;
+    let effectiveModelError: string | undefined;
+    try {
+      effectiveModel = await effective?.();
+    } catch (error) {
+      // The stored pair/revision remains readable when its inherited provider or model was
+      // removed. Model-dependent mutations still validate effective() before writing.
+      effectiveModelError = error instanceof Error ? error.message : String(error);
+    }
     this.assertModelProfileRoot(capture);
     // One provider-independent shape for reads and every successful mutation, including clear.
-    return { ...scope, ...pair, ...(effectiveModel ? { effectiveModel } : {}), authorityId: capture.authorityId,
+    return { ...scope, ...pair, ...(effectiveModel ? { effectiveModel } : {}),
+      ...(effectiveModelError ? { effectiveModelError } : {}), authorityId: capture.authorityId,
       sequence: ++this.modelProfileSequence, profileState: !pair.profile ? 'absent' : pair.profile.thinkingOverride ? 'overridden' : 'default',
       ...(receipt ?? {}), outcome: receipt ? 'committed' : 'observed' };
   }
@@ -189,9 +198,9 @@ export class VscodeConfigurationMutations {
           const current = await effective?.();
           if (!current || createStorageRevision(current) !== createStorageRevision(set.expectedEffectiveModel ?? null)) throw new Error('当前继承模型已改变；没有固定旧模型，请重新读取。');
           if (operation === 'reset') {
-            if (before.profile && !before.profile.inheritModel) {
+            if (before.profile && (!before.profile.inheritModel || inheritThinkingToChildren)) {
               const { thinkingOverride: _removed, ...kept } = before.profile;
-              profile = { ...kept, ...(inheritThinkingToChildren ? { inheritThinkingToChildren: true } : {}) };
+              profile = { ...kept, ...current };
             }
           } else {
             if (set.thinkingOverride == null) throw new Error('思维修改缺少参数；恢复默认请用 reset。');
@@ -209,8 +218,12 @@ export class VscodeConfigurationMutations {
           profile = {
             ...(before.profile ?? { id: scopeRecordId('model-profile', scope), name: '会话思维覆盖', inheritModel: true }),
             ...current,
-            ...(inheritThinkingToChildren ? { inheritThinkingToChildren: true } : {})
+            inheritThinkingToChildren: inheritThinkingToChildren === true
           };
+          if (before.profile && (before.profile.providerConfigId !== current.providerConfigId
+            || before.profile.provider !== current.provider || before.profile.model !== current.model)) {
+            delete profile.thinkingOverride;
+          }
         } else {
           profile = {
             id: before.profile?.id ?? scopeRecordId('model-profile', scope),

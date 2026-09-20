@@ -32,6 +32,71 @@ const { dryRunLlmProvider } = require('../../dist/extension/backend/capabilities
 const { applyFrozenModelProviderConfig } = require('../../dist/extension/backend/reliableKernel/llmCapabilityProviderRegistry.js');
 const { LlmEventType } = require('../../dist/extension/backend/world/modules/llm/events.js');
 
+test('会话读取保留已保存版本，失效模型仍可通过选择有效模型恢复', async () => {
+  await fixture(async f => {
+    await f.configuration.mutations.setModelProfile({ scopeKind: 'conversation', scopeId: 'parent',
+      providerConfigId: f.provider.id, provider: f.provider.provider, model: 'removed-model' });
+    const { send, receive, T } = scopeRouter(f);
+    send('read-invalid-model', T.ModelProfileScopeRead, { scopeKind: 'conversation', scopeId: 'parent' });
+    const read = await receive('read-invalid-model');
+    assert.equal(read.outcome, 'observed');
+    assert.ok(read.revision);
+    assert.match(read.effectiveModelError, /removed-model/);
+    send('repair-model', T.ModelProfileScopeSet, { scopeKind: 'conversation', scopeId: 'parent',
+      authorityId: read.authorityId, sessionId: read.sessionId, expectedRevision: read.revision,
+      operation: 'select', providerConfigId: f.provider.id, provider: f.provider.provider, model: f.provider.model });
+    const saved = await receive('repair-model');
+    assert.equal(saved.outcome, 'committed');
+    assert.equal(saved.effectiveModel.model, f.provider.model);
+    assert.equal(saved.effectiveModelError, undefined);
+    await f.app.agentLoop.runInput(f.input('repaired-model-input'));
+    assert.equal(f.wires.at(-1).body.reasoning_effort, 'low');
+  });
+});
+
+test('子继承可开关，恢复思维默认保留独立的子继承选择', async () => {
+  await fixture(async f => {
+    const { send, receive, T } = scopeRouter(f);
+    const scope = { scopeKind: 'conversation', scopeId: 'parent' };
+    send('inherit-read', T.ModelProfileScopeRead, scope);
+    let observed = await receive('inherit-read');
+    async function update(id, operation, extra) {
+      send(id, T.ModelProfileScopeSet, { ...scope, ...observed.effectiveModel, authorityId: observed.authorityId,
+        sessionId: observed.sessionId, expectedRevision: observed.revision, expectedEffectiveModel: observed.effectiveModel,
+        operation, ...extra });
+      observed = await receive(id);
+      assert.equal(observed.outcome, 'committed');
+      return observed.profile;
+    }
+    assert.equal((await update('inherit-on', 'inherit', { inheritThinkingToChildren: true })).inheritThinkingToChildren, true);
+    assert.equal((await update('inherit-off', 'inherit', { inheritThinkingToChildren: false })).inheritThinkingToChildren, false);
+    await update('inherit-on-again', 'inherit', { inheritThinkingToChildren: true });
+    await update('thinking-high', 'thinking', { thinkingOverride: { kind: 'openai-effort', value: 'high' } });
+    const reset = await update('thinking-reset', 'reset', { thinkingOverride: null });
+    assert.equal(reset.thinkingOverride, undefined);
+    assert.equal(reset.inheritThinkingToChildren, true);
+    assert.equal(reset.inheritModel, true);
+    // Changing an inherited model cannot transplant a former model's override when
+    // the user resets thinking or toggles the independent child-inheritance setting.
+    await update('old-model-thinking', 'thinking', { thinkingOverride: { kind: 'openai-effort', value: 'high' } });
+    const nextProvider = { ...f.provider, model: 'gpt-5.6-terra', models: [...f.provider.models, { id: 'gpt-5.6-terra', name: 'Terra' }] };
+    await f.save('llmProviderConfigs', { configs: [nextProvider] });
+    send('changed-model-read', T.ModelProfileScopeRead, scope);
+    observed = await receive('changed-model-read');
+    assert.equal(observed.effectiveModel.model, nextProvider.model);
+    const changed = await update('changed-model-inherit-off', 'inherit', { inheritThinkingToChildren: false });
+    assert.equal(changed.thinkingOverride, undefined);
+    assert.equal(changed.model, nextProvider.model);
+    await update('changed-model-inherit-on', 'inherit', { inheritThinkingToChildren: true });
+    await f.save('llmProviderConfigs', { configs: [f.provider] });
+    send('original-model-read', T.ModelProfileScopeRead, scope);
+    observed = await receive('original-model-read');
+    const restored = await update('reset-after-model-change', 'reset', { thinkingOverride: null });
+    assert.equal(restored.model, f.provider.model);
+    assert.equal(restored.inheritThinkingToChildren, true);
+  });
+});
+
 async function fixture(run, hooks = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'limcode-session-thinking-runtime-'));
   let app, coordinator;
@@ -145,7 +210,7 @@ for (const inheritedScope of ['agent', 'workflow']) test(`review scope actual co
       assert.equal(effective.providerConfigId, provider.id); assert.equal(effective.model, provider.model);
       // The same effective identity is passed by Composer to this production script-setup.
       const control = ui.control(provider, effective.model);
-      assert.equal(control.defaultLabel.value, '模型默认');
+      assert.equal(control.defaultLabel.value, '默认 · 1024 tokens');
       control.save('2048');
       await ui.store.awaitSavedForScope('conversation', 'parent');
       const saved = ui.store.confirmedFor('conversation', 'parent');

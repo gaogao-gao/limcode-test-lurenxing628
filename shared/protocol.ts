@@ -2746,6 +2746,8 @@ export interface ModelProfileScopeSnapshotPayload extends Partial<ModelProfileSc
   profile?: ModelProfileRecord;
   link?: ModelProfileScopeLinkRecord;
   effectiveModel?: ChatModelOverrideRecord;
+  /** A broken model selection must not prevent reading or repairing the saved scope. */
+  effectiveModelError?: string;
   afterRequestId?: string;
   outcome: 'observed' | 'committed' | 'uncertain';
   error?: string;

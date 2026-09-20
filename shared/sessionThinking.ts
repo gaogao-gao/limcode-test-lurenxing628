@@ -1,13 +1,14 @@
 import type { LlmGenerationConfigRecord, LlmRequestBodyRecord, LlmProviderKind, LlmThinkingConfigRecord, LlmThinkingLevel, SessionThinkingOverride } from './protocol';
 import { isAstraModel } from './openAIResponsesCapabilities';
 import { geminiThinkingCapabilityForModel, isGeminiThinkingLevelSupported } from './geminiThinking';
+import { THINKING_LEVEL_OPTIONS } from './llmThinkingLevels';
 
 export type SessionThinkingCapability =
   | { kind: 'gemini-budget' | 'claude-budget'; min: number; max: number; automatic?: number; allowZero?: boolean }
   | { kind: 'openai-effort' | 'gemini-level' | 'claude-effort' | 'deepseek-effort'; values: readonly LlmThinkingLevel[] };
 
-/** Conservative allowlist: unknown relay aliases retain their existing settings, but get no shortcut. */
-export function sessionThinkingCapability(provider: LlmProviderKind, modelId: string, maxOutputTokens?: number): SessionThinkingCapability | undefined {
+/** Known model constraints take priority. Configured relay aliases reuse the channel editor's values. */
+export function sessionThinkingCapability(provider: LlmProviderKind, modelId: string, maxOutputTokens?: number, configuredThinking?: LlmThinkingConfigRecord): SessionThinkingCapability | undefined {
   const model = modelId.toLowerCase().replace(/^models\//, '');
   if (provider === 'gemini') {
     const capability = geminiThinkingCapabilityForModel(model);
@@ -20,12 +21,13 @@ export function sessionThinkingCapability(provider: LlmProviderKind, modelId: st
   }
   if (provider === 'claude') {
     if (/^claude-(opus|sonnet)-4[.-]6(?:-\d{8})?$/.test(model)) {
-      return { kind: 'claude-effort', values: model.includes('opus') ? ['none', 'low', 'medium', 'high', 'max'] : ['none', 'low', 'medium', 'high'] };
+      return configuredEffort(provider, configuredThinking)
+        ?? { kind: 'claude-effort', values: model.includes('opus') ? ['none', 'low', 'medium', 'high', 'max'] : ['none', 'low', 'medium', 'high'] };
     }
     if (/^claude-(?:3[.-]7-sonnet|(?:sonnet|opus)-4(?:[.-][015])?)(?:-|$)/.test(model) && Number.isSafeInteger(maxOutputTokens) && maxOutputTokens! > 1024) {
       return { kind: 'claude-budget', min: 1024, max: maxOutputTokens! - 1 };
     }
-    return undefined;
+    return configuredEffort(provider, configuredThinking);
   }
   if (provider === 'openai-compatible' || provider === 'openai-responses') {
     if (/^o[134](?:-|$)/.test(model) && !/^o1-(?:mini|preview)/.test(model)) return { kind: 'openai-effort', values: ['low', 'medium', 'high'] };
@@ -35,11 +37,18 @@ export function sessionThinkingCapability(provider: LlmProviderKind, modelId: st
     if (isAstraModel(model) && provider === 'openai-responses') return { kind: 'openai-effort', values: ['low', 'medium', 'high', 'xhigh', 'max'] };
   }
   if (provider === 'deepseek' && /^deepseek-(?:reasoner|v4)(?:-|$)/.test(model)) return { kind: 'deepseek-effort', values: ['none', 'high', 'max'] };
-  return undefined;
+  return configuredEffort(provider, configuredThinking);
+}
+
+function configuredEffort(provider: LlmProviderKind, thinking?: LlmThinkingConfigRecord): SessionThinkingCapability | undefined {
+  const values = THINKING_LEVEL_OPTIONS[provider].map(option => option.value);
+  if (!thinking?.thinkingLevel || !values.includes(thinking.thinkingLevel) || provider === 'gemini') return undefined;
+  const kind = provider === 'claude' ? 'claude-effort' : provider === 'deepseek' ? 'deepseek-effort' : 'openai-effort';
+  return { kind, values };
 }
 
 export function validateSessionThinkingOverride(value: SessionThinkingOverride, provider: LlmProviderKind, model: string, generation?: LlmGenerationConfigRecord, requestBody?: LlmRequestBodyRecord): SessionThinkingOverride {
-  const capability = sessionThinkingCapability(provider, model, generation?.maxOutputTokens);
+  const capability = sessionThinkingCapability(provider, model, generation?.maxOutputTokens, generation?.thinkingConfig);
   if (!value || !capability || value.kind !== capability.kind) throw new Error('当前模型不支持此思维参数，请恢复默认或重新选择。');
   if (provider === 'claude' && ('tokens' in value || value.value !== 'none')) {
     const temperature = requestBody && Object.prototype.hasOwnProperty.call(requestBody, 'temperature') ? requestBody.temperature : generation?.temperature;

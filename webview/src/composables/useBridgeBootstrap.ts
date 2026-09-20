@@ -47,6 +47,7 @@ export function useBridgeBootstrap(): void {
       const previousClientId = announcedClientId;
       if (message.clientId) announcedClientId = message.clientId;
       if (previousClientId && message.clientId && previousClientId !== message.clientId) {
+        modelProfiles.reconnectScopes();
         globalSettings.reconcilePendingSettings();
         bridge.ready();
       }
@@ -107,8 +108,10 @@ export function useBridgeBootstrap(): void {
       if (payload.requestType === BridgeMessageType.InteractionResolve) {
         interactions.observeTransportError(message.correlationId, payload.message);
       }
-      if (payload.requestType === BridgeMessageType.ModelProfileScopeSet) {
-        modelProfiles.rejectPending(message.correlationId, payload.message);
+      if (payload.requestType === BridgeMessageType.ModelProfileScopeSet
+        || payload.requestType === BridgeMessageType.ModelProfileScopeClear
+        || payload.requestType === BridgeMessageType.ModelProfileScopeRead) {
+        modelProfiles.rejectRequest(message.correlationId, payload.message);
       }
       if (payload.requestType === BridgeMessageType.ConversationAgentSelect) {
         agents.rejectPending(message.correlationId, payload.message);

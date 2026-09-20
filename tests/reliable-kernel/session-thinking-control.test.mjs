@@ -24,6 +24,7 @@ function fixture(overrides = {}) {
     childThinkingInheritanceFor: () => state.inherit,
     pendingFor: () => state.pending,
     errorFor: () => state.error,
+    confirmedFor: () => state.observation,
     readingFor: () => false,
     setThinkingForScope: (...args) => writes.push(['thinking', ...args]),
     setChildThinkingInheritance: (...args) => writes.push(['inherit', ...args]),
@@ -42,6 +43,7 @@ function fixture(overrides = {}) {
       require(name) {
         if (name === 'vue') return vue;
         if (name === '@webview/stores/useModelProfileStore') return { useModelProfileStore: () => store };
+        if (name.endsWith('/LcCheckbox.vue')) return load('webview/src/components/ui/LcCheckbox.vue', 'render');
         if (name.endsWith('.vue')) return { default: dropdown };
         if (name.startsWith('@shared/')) return load('shared/' + name.slice(8) + '.ts');
         if (name.startsWith('./')) return load('shared/' + name.slice(2) + '.ts');
@@ -69,34 +71,33 @@ test('Composer renders one thinking control beside model/workspace selectors, wi
 test('Thinking UI has only one dropdown, one child-inheritance checkbox and an inline retry', () => {
   const nodes = templateElements(controlPath);
   assert.equal(nodes.filter(node => node.tag === 'SettingsDropdown' || node.tag === 'select').length, 1);
-  const inputs = nodes.filter(node => node.tag === 'input');
-  assert.equal(inputs.length, 1, 'no legacy numeric/token editor');
-  assert.equal(attribute(inputs[0], 'type'), 'checkbox');
+  assert.equal(nodes.filter(node => node.tag === 'input').length, 0);
+  assert.equal(nodes.filter(node => node.tag === 'LcCheckbox').length, 1, 'use the shared accessible checkbox');
   const source = fs.readFileSync(controlPath, 'utf8');
   assert.match(source, /子继承/);
   assert.match(source, /重试/);
-  assert.doesNotMatch(source, /ModelProfileSaveStatus|应用|放弃草稿|重新接入|adoptRoot/);
+  assert.doesNotMatch(source, /ModelProfileSaveStatus|应用|放弃草稿|重新接入/);
 });
 
-test('Unset supported model displays 无, explicit configuration displays 模型默认', () => {
+test('Default label shows the actual inherited value and distinguishes service defaults', () => {
   const f = fixture();
-  assert.equal(f.control.defaultLabel.value, '无');
+  assert.equal(f.control.defaultLabel.value, '默认 · 服务默认');
   assert.equal(f.control.selected.value, 'default');
   f.props.config.generationConfig = { thinkingConfig: { thinkingLevel: 'high' } };
-  assert.equal(f.control.defaultLabel.value, '模型默认');
+  assert.equal(f.control.defaultLabel.value, '默认 · high');
   f.props.config.modelConfigs = [{ modelId: 'o3', generationConfig: {} }];
-  assert.equal(f.control.defaultLabel.value, '无', 'model config replaces channel defaults');
+  assert.equal(f.control.defaultLabel.value, '默认 · 服务默认', 'model config replaces channel defaults');
 });
 
-test('Budget default shows 模型默认; unsupported and unknown models display disabled 无', () => {
+test('Budget defaults remain visible; unsupported model shortcuts remain disabled', () => {
   const f = fixture({ props: { model: 'gemini-2.5-flash', config: { id: 'gemini', provider: 'gemini', modelConfigs: [], generationConfig: { thinkingConfig: { thinkingBudget: 1024 } } } } });
-  assert.equal(f.control.defaultLabel.value, '模型默认');
+  assert.equal(f.control.defaultLabel.value, '默认 · 1024 tokens');
   assert.ok(f.control.options.value.some(option => option.value === '2048'));
   for (const model of ['gemini-2.0-flash', 'unknown-relay']) {
     f.props.model = model;
-    assert.equal(f.control.defaultLabel.value, '无');
+    assert.equal(f.control.defaultLabel.value, '默认 · 不支持（不发送）');
     assert.equal(f.control.disabled.value, true);
-    assert.deepEqual(plain(f.control.options.value), [{ value: 'default', label: '无' }]);
+    assert.deepEqual(plain(f.control.options.value), [{ value: 'default', label: '默认 · 不支持（不发送）' }]);
   }
 });
 
@@ -109,24 +110,24 @@ test('Dropdown saves immediately, default resets, child checkbox reads and write
   assert.equal(f.writes[1][3], null);
   f.state.inherit = true;
   assert.equal(f.control.inheritChildren.value, true);
-  f.control.setInheritance({ target: { checked: false } });
+  f.control.setInheritance(false);
   assert.deepEqual(plain(f.writes[2]), ['inherit', 'a', { providerConfigId: 'channel', provider: 'openai-compatible', model: 'o3' }, false]);
   f.props.conversationId = 'b';
-  f.control.setInheritance({ target: { checked: true } });
+  f.control.setInheritance(true);
   assert.equal(f.writes[3][1], 'b');
   assert.equal(f.writes[3][3], true);
 });
 
-test('Errors are short text and retry delegates to guarded store read/retry, never root adoption', () => {
+test('Errors retain the repair reason; explicit read retry renews the editing session', () => {
   const f = fixture({ state: { pending: { status: 'uncertain', error: 'authority/root internals long error' } } });
-  assert.equal(f.control.error.value, '设置未保存');
+  assert.equal(f.control.error.value, 'authority/root internals long error');
   f.control.retry();
   assert.deepEqual(f.reads, [['retry', 'conversation', 'a']]);
   f.state.pending = undefined;
   f.state.error = 'internal read error';
-  assert.equal(f.control.error.value, '读取失败');
+  assert.equal(f.control.error.value, 'internal read error');
   f.control.retry();
-  assert.deepEqual(f.reads[1], ['refresh', 'conversation', 'a']);
+  assert.deepEqual(plain(f.reads[1]), ['refresh', 'conversation', 'a', { adoptRoot: true }]);
 });
 
 // Minimal host renderer mounts the real SFC template; no browser/VS Code visual claims.
@@ -152,18 +153,18 @@ test('Mounted template binds dropdown change and checkbox checked/change to the 
   const mounted = mountControl(f.component(), f.props);
   try {
     assert.equal(mounted.find('select').length, 1);
-    assert.equal(mounted.find('input')[0].props.checked, false);
+    assert.equal(mounted.find('button').find(item => item.props.role === 'checkbox').props['aria-checked'], false);
     mounted.find('select')[0].props.onChange({ target: { value: 'high' } });
     assert.equal(f.writes[0][3].value, 'high');
-    mounted.find('input')[0].props.onChange({ target: { checked: true } });
+    mounted.find('button').find(item => item.props.role === 'checkbox').props.onClick();
     assert.equal(f.writes[1][3], true);
     f.state.inherit = true;
     await vue.nextTick();
-    assert.equal(mounted.find('input')[0].props.checked, true);
+    assert.equal(mounted.find('button').find(item => item.props.role === 'checkbox').props['aria-checked'], true);
     f.props.model = 'gpt-4o';
     await vue.nextTick();
     assert.equal(mounted.find('select')[0].props.disabled, true);
-    assert.equal(mounted.find('option')[0].text, '无');
+    assert.equal(mounted.find('option')[0].text, '默认 · 服务默认');
   } finally { mounted.dispose(); }
 });
 

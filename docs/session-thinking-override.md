@@ -7,7 +7,7 @@
 - 底栏从 authority 获取 conversation → workflow → agent → global 的有效模型；thinking/reset 在同一 mutation lock 内校验 `expectedEffectiveModel`。继承改变时拒绝旧选择，不把 global fallback 或旧继承身份偷偷固化到会话。
 - 模型专属配置**整体替代**渠道设置；专属配置没有 generationConfig 即未设置，不继承渠道的思维数值。选择默认时显示现有有效设置，未设置显示“服务默认”。Gemini/Astra 的现有适配器补值/归一化另作标注，不把参数编辑器示例值当成服务默认。
 - 切渠道/模型走现有 selection 入口并清掉覆盖，不进行数字与等级换算。普通 Fork 沿用已有配置复制，复制成目标独立记录；本改动不修改 Fork 实现。
-- 子 Agent 的模型选择规则不变；初始化仍只复制模型标识。请求参数解析只查**子会话自身** record，忽略父 Turn 的思维选择；已经设置了子会话覆盖则保留它，嵌套同理。
+- 子 Agent 的模型选择规则不变。默认不继承父会话思维；勾选「子继承」后按现有初始化路径复制兼容的思维覆盖。请求参数解析只查**子会话自身** record；已有子会话覆盖优先。
 
 ## 单次请求生效
 
@@ -31,7 +31,7 @@
 | Claude 3.7 Sonnet / 已识别旧4系 | `thinking.budget_tokens` | 明确 maxOutputTokens；整数≥1024且小于输出上限；temperature仅省略/1，top_k省略，top_p仅省略或0.95–1，不合法拒绝保存 |
 | Claude 精确4.6 Opus/Sonnet（及日期标识） | adaptive + `output_config.effort` | 与预算互斥；none为关闭；不猜测未来4.x，不静默降档 |
 | DeepSeek 已识别 reasoner/v4 | `thinking.type` / `reasoning_effort` | none/high/max；不使用 OpenAI 全部档位 |
-| 未知别名 / 自定义渠道模型 | 现有默认照常请求；如有思维配置显示“未知能力” | 不把未知当作已验证支持，不新增猜测参数；可在原渠道设置显式配置 |
+| 未知别名 / 自定义渠道模型 | 显示现有渠道或模型配置；已配置 effort 时复用渠道编辑器的参数集合 | 未配置时不猜测能力；Gemini 保留具体型号约束。参数集合来自 `shared/llmThinkingLevels.ts`，不代表远端服务已通过联调 |
 | 与思维/输出相关 custom body | 保留已有 body，快捷覆盖报冲突 | 失败草稿保留，可确认重试/放弃草稿/恢复默认；不全局阻塞其他会话 |
 
 不声明适用于所有第三方兼容端点。已知名称也可能被中继限制；实际能力报错仍来自原 provider 请求路径。能力白名单需随仓库 adapter 与模型证据更新，不是旧协议 fallback。
@@ -41,14 +41,17 @@
 - UI 区分未提交草稿、保存中、结果未确定、已读取已保存值。10秒未确认仅表示 uncertain；可能已提交，绝不把超时/异常解释为未写或取消。
 - Router 收到 ModelProfile 写消息、进入任何 preflight/owner/queue await **之前**注册 completion Promise。afterRequestId 读等待对应操作 settled，再进入同一 `.configuration-authority` 跨进程锁观察实际 pair/absence。未知请求/超时/换 host 只报告结果未确定，不重发、不用旧值冒充成功。
 - CAS 比较 scope + profile/link完整内容（包括安全 absence），不只看 profile id；确认带 authority、session、sequence 与相关 request id。旧 full ConfigurationSnapshot 仅触发 scoped reread，不覆盖已确认 scope；晚到的旧 after-read 不能移除后续 queued write 的关联。
-- 快速 high→medium→reset 串行提交并使用前次实际 revision；发送只等**当前 conversation**的保存。Composer 的等待/错误也按 conversation 分离，切会话不会阻塞新会话或把旧 await 发送到新会话。ModelProfileSaveStatus 独立于 thinking 能力，未知模型保存错误、重试/重新读取/放弃入口不会随控件消失。
+- 快速 high→medium→reset 串行提交并使用前次实际 revision；发送只等**当前 conversation**的保存。Composer 的等待/错误也按 conversation 分离，切会话不会阻塞新会话或把旧 await 发送到新会话。底栏思维控件直接展示失败原因与重试入口；配置编辑页复用 ModelProfileSaveStatus。
+- 读取有效模型失败时仍返回已保存的 profile/link、revision 与 `effectiveModelError`，允许重新选择模型修复。配置读取只载入相关 scope 引用的模型记录，避免扫描所有会话模型文件。
+- 写入结果未知时，第一次重试仍先读取原操作结果。若该读取也失败，下一次显式重试重建编辑会话、保留旧草稿并解除发送等待；不自动重放未知写入。更换 Host 时同样重新读取，迟到回执不能恢复旧状态。
+- `inheritModel` 记录只承载思维设置；发送、编辑和重试均不把其中保存的旧模型身份变成显式模型选择。重置思维保留独立的「子继承」开关，关闭该开关明确保存 false。
 - **没有“撤销已提交写入”**：放弃未提交草稿只丢本地草稿；有 requestId 时必须 after-read 确认实际状态后放弃。恢复默认是新的 thinking-only CAS reset，不是补偿回写。显式重连保留旧草稿为 detached，不自动跨代提交。
 
 ### 渠道无关的操作确认契约
 
 `modelProfileObservation`是read及全部成功mutation的共同构造点。成功mutation统一包含宿主确认的`operation`（实际语义为select/thinking/reset/clear）、实际使用的`expectedRevision`、结果`revision`、scope、authority、sequence及原通道关联的session/correlationId。clear不再依靠缺少profile来猜测操作完成。前端使用发送时保存的submitted操作/基线匹配，而不是当前可能已queued的新选择；同时验证profile/link成对、scope和记录id一致。
 
-`profileState`明确区分：`absent`=没有本scope的profile/link，`default`=有模型记录但无思维覆盖，`overridden`=有显式思维覆盖（包括none/0等显式值），`unknown`=结果未确定。异常路由只能返回unknown，不能表示absence；读到或收到不完整/不一致结构也不能当作保存成功。reset仍区分显式模型（保留模型，仅去覆盖）与inherit-only记录（去掉本地记录、恢复继承），不是clear的别名。
+`profileState`明确区分：`absent`=没有本scope的profile/link，`default`=有模型记录但无思维覆盖，`overridden`=有显式思维覆盖（包括none/0等显式值），`unknown`=结果未确定。异常路由只能返回unknown，不能表示absence；读到或收到不完整/不一致结构也不能当作保存成功。reset仍区分显式模型（保留模型，仅去覆盖）与inherit-only记录（若未启用子继承，则去掉本地记录），不是clear的别名。
 
 本确认格式与OpenAI/Claude/Gemini/DeepSeek无关，没有改变已有provider能力/格式代码。真实组件script-setup/Pinia→router→authority的交叉测试从OpenAI high切换到：OpenAI另一渠道effort、Gemini budget、Claude budget、Claude adaptive none、DeepSeek none、无thinking能力gpt-4o。每条路径验证select/reset/clear回执、实际落盘与UI观察一致；clear后由当前Agent继承链解析有效模型，再set覆盖（无能力模型执行reset），并生成真实临时Turn/dry-run请求。旧模型expectedEffectiveModel和旧revision均由真实router拒绝，实际absence不改变。
 

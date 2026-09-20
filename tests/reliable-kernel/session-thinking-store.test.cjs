@@ -34,7 +34,7 @@ function fixture() {
   client = load('webview/src/stores/useClientStateStore.ts').useClientStateStore();
   store = load('webview/src/stores/useModelProfileStore.ts').useModelProfileStore();
   load('webview/src/composables/useBridgeBootstrap.ts').useBridgeBootstrap();
-  const emit = (type, payload, correlationId) => listeners.get(type)?.({ payload, correlationId });
+  const emit = (type, payload, correlationId, clientId) => listeners.get(type)?.({ payload, correlationId, clientId });
   const reply = (request, payload) => emit(protocol.BridgeMessageType.ModelProfileScopeSnapshot,
     payload.outcome === 'committed' ? { operation: request.type === protocol.BridgeMessageType.ModelProfileScopeClear ? 'clear' : request.payload.operation, expectedRevision: request.payload.expectedRevision, ...payload } : payload, request.id);
   const read = (scopeId, payload = snapshot(scopeId, 'low', 1)) => { store.refreshScope('conversation', scopeId); reply(requests.at(-1), payload); };
@@ -48,6 +48,73 @@ function snapshot(scopeId, value, sequence, authorityId = 'root-a') {
     ...(profile ? { profile, link: { id: `link-${scopeId}`, scopeKind: 'conversation', scopeId, modelProfileId: profile.id, role: 'active', createdAt: 1, updatedAt: sequence } } : {}) };
 }
 const choose = (f, scope, value) => f.store.setThinkingForScope(scope, vue.reactive(model), vue.reactive({ kind: 'openai-effort', value }));
+
+test('失效编辑会话的重读失败后显式重连，解除发送等待且不重放旧写入', async () => {
+  const f = fixture(); f.read('a'); choose(f, 'a', 'high');
+  const write = f.requests.at(-1);
+  f.store.rejectPending(write.id, 'connection lost');
+  f.store.retryPending('conversation', 'a');
+  f.reply(f.requests.at(-1), { ...snapshot('a', undefined, 2), outcome: 'uncertain', revision: '', error: 'expired session' });
+  f.store.retryPending('conversation', 'a');
+  const recovery = f.requests.at(-1);
+  assert.equal(recovery.payload.renewSession, true);
+  assert.equal(recovery.payload.afterRequestId, undefined);
+  f.reply(recovery, { ...snapshot('a', 'low', 3), sessionId: 'renewed' });
+  await f.store.awaitSavedForScope('conversation', 'a');
+  assert.equal(f.store.pendingFor('conversation', 'a'), undefined);
+  assert.equal(f.store.detachedFor('conversation', 'a').profile.thinkingOverride.value, 'high');
+  f.reply(write, { ...snapshot('a', 'high', 99), outcome: 'committed' });
+  assert.equal(f.store.thinkingFor('conversation', 'a').value, 'low');
+  assert.equal(f.requests.filter(r => r.type === protocol.BridgeMessageType.ModelProfileScopeSet).length, 1);
+});
+
+test('transport读取错误立即结束loading，并允许取得新的scope版本', () => {
+  const f = fixture(); f.store.activateScope('conversation', 'a');
+  const read = f.requests.at(-1);
+  f.emit(protocol.BridgeMessageType.Error, { requestType: read.type, message: 'read failed' }, read.id);
+  assert.equal(f.store.readingFor('conversation', 'a'), false);
+  assert.equal(f.store.errorFor('conversation', 'a'), 'read failed');
+  f.read('a');
+  assert.equal(f.store.errorFor('conversation', 'a'), '');
+});
+
+test('首次读取失败时保留的模型选择也能通过显式重连解除发送等待', async () => {
+  const f = fixture();
+  f.store.setProfileForScope('conversation', 'a', model);
+  const read = f.requests.at(-1);
+  f.emit(protocol.BridgeMessageType.Error, { requestType: read.type, message: 'initial read failed' }, read.id);
+  f.store.retryPending('conversation', 'a');
+  f.reply(f.requests.at(-1), snapshot('a', null, 1));
+  await f.store.awaitSavedForScope('conversation', 'a');
+  assert.equal(f.store.pendingFor('conversation', 'a'), undefined);
+  assert.ok(f.store.detachedFor('conversation', 'a'));
+  assert.equal(f.requests.filter(r => r.type === protocol.BridgeMessageType.ModelProfileScopeSet).length, 0);
+});
+
+test('Hello更换host后重新读取，旧保存不能恢复旧scope或阻塞发送', async () => {
+  const f = fixture();
+  f.emit(protocol.BridgeMessageType.Hello, {}, undefined, 'host-a');
+  f.store.activateScope('conversation', 'a'); f.reply(f.requests.at(-1), snapshot('a', 'low', 1));
+  choose(f, 'a', 'high'); const old = f.requests.at(-1);
+  const waiting = assert.rejects(f.store.awaitSavedForScope('conversation', 'a'), /连接已更换/);
+  f.emit(protocol.BridgeMessageType.Hello, {}, undefined, 'host-b');
+  await waiting;
+  const fresh = f.requests.at(-1);
+  assert.equal(fresh.type, protocol.BridgeMessageType.ModelProfileScopeRead);
+  assert.equal(fresh.payload.sessionId, undefined);
+  f.reply(fresh, snapshot('a', 'medium', 1, 'root-b'));
+  f.reply(old, { ...snapshot('a', 'high', 100), outcome: 'committed' });
+  await f.store.awaitSavedForScope('conversation', 'a');
+  assert.equal(f.store.thinkingFor('conversation', 'a').value, 'medium');
+});
+
+test('上级模型变化后不展示旧模型的思维覆盖', () => {
+  const f = fixture(); const observed = snapshot('a', 'high', 1);
+  observed.profile.inheritModel = true;
+  observed.effectiveModel = { ...model, model: 'new-model' };
+  f.read('a', observed);
+  assert.equal(f.store.thinkingFor('conversation', 'a'), undefined);
+});
 
 test('真实bootstrap full payload迟到不覆盖已确认scope；只触发受控读并接受外部更新', () => {
   const f = fixture(); f.store.activateScope('conversation', 'a'); f.reply(f.requests.at(-1), snapshot('a', 'low', 1));

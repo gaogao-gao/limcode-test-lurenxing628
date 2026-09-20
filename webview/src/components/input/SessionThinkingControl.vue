@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
 import type { ChatModelOverrideRecord, LlmProviderConfigRecord, LlmThinkingLevel, SessionThinkingOverride } from '@shared/protocol';
-import { sessionThinkingCapability, validateSessionThinkingOverride } from '@shared/sessionThinking';
+import { sessionThinkingCapability, sessionThinkingDisplayLabel, validateSessionThinkingOverride } from '@shared/sessionThinking';
 import { hasThinkingBodyConflict } from '@shared/sessionThinkingBody';
 import { useModelProfileStore } from '@webview/stores/useModelProfileStore';
 import SettingsDropdown, { type SettingsDropdownOption } from '@webview/components/settings/global/SettingsDropdown.vue';
+import LcCheckbox from '@webview/components/ui/LcCheckbox.vue';
 
 const props = defineProps<{ conversationId?: string; config?: LlmProviderConfigRecord; model?: string }>();
 const store = useModelProfileStore();
@@ -12,7 +13,7 @@ const localError = ref('');
 // A model's advanced configuration replaces (rather than merges with) channel defaults.
 const settings = computed(() => props.config?.modelConfigs.find(item => item.modelId === props.model) ?? props.config);
 const capability = computed(() => props.config && props.model
-  ? sessionThinkingCapability(props.config.provider, props.model, settings.value?.generationConfig?.maxOutputTokens)
+  ? sessionThinkingCapability(props.config.provider, props.model, settings.value?.generationConfig?.maxOutputTokens, settings.value?.generationConfig?.thinkingConfig)
   : undefined);
 const pending = computed(() => store.pendingFor('conversation', props.conversationId));
 const override = computed(() => store.thinkingFor('conversation', props.conversationId));
@@ -21,13 +22,8 @@ const ready = computed(() => !!props.conversationId && !!props.config && !!props
 const busy = computed(() => pending.value?.status === 'saving');
 const disabled = computed(() => !ready.value || !capability.value || busy.value);
 const defaultLabel = computed(() => {
-  const supported = capability.value;
-  if (!supported) return '无';
-  const thinking = settings.value?.generationConfig?.thinkingConfig;
-  const configured = 'min' in supported
-    ? thinking?.thinkingBudget !== undefined
-    : !!thinking?.thinkingLevel && !['not-set', 'non-set'].includes(thinking.thinkingLevel);
-  return configured ? '模型默认' : '无';
+  if (!props.config || !props.model) return '待读取';
+  return `默认 · ${sessionThinkingDisplayLabel(props.config.provider, props.model, settings.value?.generationConfig?.thinkingConfig)}`;
 });
 const selected = computed(() => {
   const value = override.value;
@@ -55,7 +51,8 @@ const options = computed<SettingsDropdownOption[]>(() => {
   }
   return result;
 });
-const error = computed(() => localError.value || (pending.value?.error ? '设置未保存' : store.errorFor('conversation', props.conversationId) ? '读取失败' : ''));
+const error = computed(() => localError.value || pending.value?.error || store.errorFor('conversation', props.conversationId)
+  || store.confirmedFor('conversation', props.conversationId)?.effectiveModelError || '');
 watch(() => [props.conversationId, props.config?.id, props.model], () => { localError.value = ''; });
 function modelIdentity(): ChatModelOverrideRecord {
   return { providerConfigId: props.config!.id, provider: props.config!.provider, model: props.model! };
@@ -67,7 +64,7 @@ function save(value: string): void {
     let next: SessionThinkingOverride | null = null;
     if (value !== 'default') {
       if (hasThinkingBodyConflict(props.config!.provider, settings.value?.requestBody)) {
-        localError.value = '参数冲突';
+        localError.value = '自定义请求体已控制思维参数，请先在渠道设置中调整。';
         return;
       }
       const supported = capability.value!;
@@ -75,19 +72,19 @@ function save(value: string): void {
       next = validateSessionThinkingOverride(next, props.config!.provider, props.model!, settings.value?.generationConfig, settings.value?.requestBody);
     }
     store.setThinkingForScope(props.conversationId!, modelIdentity(), next);
-  } catch {
-    localError.value = '设置未保存';
+  } catch (error) {
+    localError.value = error instanceof Error ? error.message : String(error);
   }
 }
-function setInheritance(event: Event): void {
+function setInheritance(enabled: boolean): void {
   if (!ready.value || busy.value) return;
-  store.setChildThinkingInheritance(props.conversationId!, modelIdentity(), (event.target as HTMLInputElement).checked);
+  store.setChildThinkingInheritance(props.conversationId!, modelIdentity(), enabled);
 }
 function retry(): void {
   if (!props.conversationId) return;
   localError.value = '';
   if (pending.value) store.retryPending('conversation', props.conversationId);
-  else store.refreshScope('conversation', props.conversationId);
+  else store.refreshScope('conversation', props.conversationId, { adoptRoot: true });
 }
 </script>
 
@@ -102,10 +99,9 @@ function retry(): void {
       placement="top"
       @update:model-value="save"
     />
-    <label class="session-thinking-inherit" title="子 Agent 继承本对话的思维设置">
-      <input type="checkbox" :checked="inheritChildren" :disabled="!ready || busy" @change="setInheritance" />
-      <span>子继承</span>
-    </label>
+    <LcCheckbox class="session-thinking-inherit" size="sm" :model-value="inheritChildren"
+      :disabled="!ready || busy" aria-label="子 Agent 继承本对话的思维设置"
+      @update:model-value="setInheritance">子继承</LcCheckbox>
     <span v-if="error" class="session-thinking-error" role="status">
       {{ error }} <button type="button" :disabled="store.readingFor('conversation', conversationId)" @click="retry">重试</button>
     </span>
@@ -114,11 +110,10 @@ function retry(): void {
 
 <style scoped>
 .session-thinking-control { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; }
-.session-thinking-dropdown { width: 86px; }
+.session-thinking-dropdown { min-width: 86px; max-width: 190px; }
 .session-thinking-dropdown :deep(.settings-dropdown-button) { min-height: 24px; padding: 2px 6px; font-size: 11px; }
 .session-thinking-inherit { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; font-size: 11px; cursor: pointer; }
-.session-thinking-inherit input { margin: 0; accent-color: var(--vscode-focusBorder); }
-.session-thinking-error { color: var(--vscode-errorForeground); font-size: 11px; white-space: nowrap; }
+.session-thinking-error { color: var(--vscode-errorForeground); font-size: 11px; overflow-wrap: anywhere; }
 .session-thinking-error button { border: 0; background: none; color: var(--vscode-textLink-foreground); padding: 0; cursor: pointer; font: inherit; }
 .session-thinking-error button:disabled { opacity: .5; cursor: default; }
 </style>
