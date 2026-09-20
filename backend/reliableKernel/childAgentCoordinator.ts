@@ -1338,8 +1338,9 @@ export class ReliableChildAgentCoordinator {
     const prompt = requireText(args.prompt, 'run_agent.prompt');
     const foregroundWaitMs = requireWaitMs(args.foregroundWaitMs);
     const answerBridgeId = optionalText(args.answerBridgeId);
+    if (args.interrupt !== undefined && typeof args.interrupt !== 'boolean') throw new Error('run_agent.interrupt must be a boolean.');
     return answerBridgeId
-      ? this.continueChild(input, answerBridgeId, prompt, foregroundWaitMs, signal, admission)
+      ? this.continueChild(input, answerBridgeId, prompt, foregroundWaitMs, args.interrupt === true, signal, admission)
       : this.spawnChild(input, args, prompt, foregroundWaitMs, authority, signal, admission);
   }
 
@@ -1377,7 +1378,7 @@ export class ReliableChildAgentCoordinator {
       completionPolicy,
       sourceSettlement: 'child_handle',
       ...(deadline ? { waitDeadlineAt: deadline } : {}),
-      ...(selection.title ? { title: selection.title } : {}),
+      ...(optionalText(args.taskName) || selection.title ? { title: (optionalText(args.taskName) || selection.title!).replace(/\s+/g, ' ').slice(0, 120) } : {}),
       leaseOwnerId: this.childLeaseOwnerId,
       leaseExpiresAt: leaseExpiry(this.timestamp(), foregroundWaitMs)
     });
@@ -1453,6 +1454,7 @@ export class ReliableChildAgentCoordinator {
     answerBridgeId: string,
     prompt: string,
     foregroundWaitMs: number,
+    interrupt: boolean,
     signal?: AbortSignal,
     admission?: ReliableSpecialToolAdmission
   ): Promise<ChildDispatchResult> {
@@ -1470,7 +1472,7 @@ export class ReliableChildAgentCoordinator {
       sourceKey: `run-agent-continuation:${input.toolCallId}`,
       sourceToolCallId: input.toolCallId,
       childExecutionId: requireId(snapshot.childExecution.id, 'ChildExecution.id'),
-      mode: activeTurnId ? 'interrupt_current_turn' : 'queue_next_turn',
+      mode: activeTurnId && interrupt ? 'interrupt_current_turn' : 'queue_next_turn',
       content: promptWithAnswerBridge(prompt),
       completionPolicy,
       ...(deadline ? { waitDeadlineAt: deadline } : {})
@@ -1487,6 +1489,14 @@ export class ReliableChildAgentCoordinator {
       return afterSend;
     }
 
+    if (activeTurnId && !interrupt) {
+      // The current child turn owns execution until its natural boundary. Recovery admits
+      // this durable continuation afterwards; do not cancel it or admit a competing turn.
+      this.triggerRecoveryPass();
+      if (completionPolicy === 'background') return this.requireWaitSettlement(input.toolCallId);
+      return this.waitContinuationForeground(input.toolCallId, answerBridgeId,
+        childContinuationTurnId(requireId(snapshot.childExecution.id, 'ChildExecution.id'), sent.turnIntentId), deadline!, signal);
+    }
     if (activeTurnId) {
       await this.cancelLocalChildTurn(
         activeTurnId,

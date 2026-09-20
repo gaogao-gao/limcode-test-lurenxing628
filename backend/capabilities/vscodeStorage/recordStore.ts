@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { RECORDS_DIR, STORAGE_VERSION } from './constants';
 import { SettingsRevisionConflictError } from '../settingsRevisionConflict';
-import { readJson, writeJson } from './json';
+import { readJson, readJsonStrict, writeJson } from './json';
 import { sortableName } from './naming';
 import { createMissingStorageRevision, createStorageRevision } from './storageRevision';
 import {
@@ -304,14 +304,30 @@ async function saveRecordStoreUnlocked<TRecord extends { id: string }, TKey exte
   const savedAt = new Date().toISOString();
   const recordsRoot = vscode.Uri.joinPath(root, RECORDS_DIR);
   await vscode.workspace.fs.createDirectory(recordsRoot);
-  // 全量保存本身会重写所有 next records，因此不能让历史索引中的空/缺失文件永久阻断修复。
-  // 在 mutation lock 内复用旧文件名；若旧文件已丢失，下面的原子 writeJson 会直接重建。
+  // Compare stored content, not just ids or timestamps. Existing callers may submit a full
+  // catalog; unchanged files and index entries must not generate writes or watcher events.
+  // Missing/invalid files still get rebuilt by this explicit full-catalog save.
   const previousIndex = await loadRecordsIndex(indexUri, false);
   const previousRecords = previousIndex?.records ?? [];
   const previousById = new Map(previousRecords.map((record) => [record.id, record]));
+  const unchanged = new Set<string>();
+  for (let offset = 0; offset < records.length; offset += LOAD_RECORD_BATCH_SIZE) {
+    await Promise.all(records.slice(offset, offset + LOAD_RECORD_BATCH_SIZE).map(async record => {
+      const previous = previousById.get(record.id);
+      if (!previous) return;
+      const stored = await readJsonStrict<RecordFile<TKey, TRecord>>(vscode.Uri.joinPath(root, ...previous.file.split('/')));
+      if (stored.status === 'ioError') throw stored.error;
+      if (stored.status === 'ok' && stored.value?.schemaVersion === STORAGE_VERSION && stored.value?.[recordKey]
+        && createStorageRevision(stored.value[recordKey]) === createStorageRevision(record)) unchanged.add(record.id);
+    }));
+  }
 
   const nextIndexRecords: RecordIndexRecord[] = [];
   for (const record of records) {
+    if (unchanged.has(record.id)) {
+      nextIndexRecords.push(previousById.get(record.id)!);
+      continue;
+    }
     const file = previousById.get(record.id)?.file ?? `${RECORDS_DIR}/${sortableName(record.id, labelForRecord(record))}.json`;
     await writeJson(vscode.Uri.joinPath(root, ...file.split('/')), {
       schemaVersion: STORAGE_VERSION,
@@ -322,11 +338,13 @@ async function saveRecordStoreUnlocked<TRecord extends { id: string }, TKey exte
   }
 
   // 先发布新索引，再清理旧文件；并发读取者只会看到“旧索引 + 完整旧文件”或新索引。
-  await writeJson(indexUri, {
-    schemaVersion: STORAGE_VERSION,
-    savedAt,
-    records: nextIndexRecords
-  } satisfies RecordsIndexFile);
+  if (!previousIndex || createStorageRevision(previousRecords) !== createStorageRevision(nextIndexRecords)) {
+    await writeJson(indexUri, {
+      schemaVersion: STORAGE_VERSION,
+      savedAt,
+      records: nextIndexRecords
+    } satisfies RecordsIndexFile);
+  }
 
   if (options.pruneMissing) {
     const nextFiles = new Set(nextIndexRecords.map((record) => record.file));

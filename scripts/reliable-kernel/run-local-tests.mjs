@@ -37,7 +37,6 @@ const CI_TEST_FILES = Object.freeze([
   'tests/reliable-kernel/guidance-queue.test.mjs',
   'tests/reliable-kernel/compression-progress-ui.test.mjs',
   'tests/reliable-kernel/configuration-authority.test.mjs',
-  'tests/reliable-kernel/session-thinking-cache.test.mjs',
   'tests/reliable-kernel/session-thinking-control.test.mjs',
   'tests/reliable-kernel/session-thinking-simple.test.mjs',
   'tests/reliable-kernel/session-thinking-runtime.test.mjs',

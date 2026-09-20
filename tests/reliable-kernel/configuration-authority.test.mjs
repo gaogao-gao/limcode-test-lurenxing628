@@ -35,6 +35,33 @@ const {
   workEnvironmentIdFromUri
 } = require('../../dist/extension/shared/workEnvironmentCatalog.js');
 
+test('渠道、压缩与 MCP 目录保存只修改选中记录，重复保存保持文件和 revision', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'limcode-catalog-delta-'));
+  try {
+    const authority = new VscodeConfigurationAuthority(() => createVscodeStoragePaths(vscode.Uri.file(root)));
+    const cases = [
+      ['llmProviderConfigs', 'configs', i => ({ ...createDefaultLlmProviderConfig(), id: `provider-${i}`, name: `Provider ${i}`, createdAt: 1, updatedAt: 1 })],
+      ['llmCompressionConfigs', 'configs', i => ({ ...createDefaultLlmCompressionConfig(), id: `compression-${i}`, name: `Compression ${i}`, createdAt: 1, updatedAt: 1 })],
+      ['mcpServers', 'servers', i => ({ id: `mcp-${i}`, name: `MCP ${i}`, enabled: false, transport: { kind: 'stdio', command: 'fixture' }, createdAt: 1, updatedAt: 1 })]
+    ];
+    for (const [section, key, make] of cases) {
+      let result = await saveLatestGlobalSettings(authority, section, { [key]: [make(1), make(2)] });
+      const index = JSON.parse(await fs.readFile(result.filePath, 'utf8'));
+      const otherFile = path.join(path.dirname(result.filePath), index.records.find(r => r.id === make(2).id).file);
+      const otherBytes = await fs.readFile(otherFile, 'utf8');
+      const edited = structuredClone(result.settings);
+      const selected = edited[key].find(r => r.id === make(1).id);
+      selected.name = 'Edited'; selected.updatedAt = 2;
+      result = await authority.saveGlobalSettings(section, edited, result.revision);
+      assert.equal(await fs.readFile(otherFile, 'utf8'), otherBytes, section);
+      const indexBytes = await fs.readFile(result.filePath, 'utf8');
+      const unchanged = await authority.saveGlobalSettings(section, result.settings, result.revision);
+      assert.equal(unchanged.revision, result.revision, section);
+      assert.equal(await fs.readFile(result.filePath, 'utf8'), indexBytes, section);
+    }
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
 async function saveLatestGlobalSettings(authority, section, settings) {
   const current = await authority.loadGlobalSettings(section);
   return authority.saveGlobalSettings(section, settings, current.revision);

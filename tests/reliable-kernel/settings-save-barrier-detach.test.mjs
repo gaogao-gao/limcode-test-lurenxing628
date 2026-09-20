@@ -19,6 +19,35 @@ const { GlobalSettingsSaveBarrier } = require('../../dist/extension/backend/appl
 const { createVscodeStoragePaths } = require('../../dist/extension/backend/capabilities/vscodeStorage/paths.js');
 const { saveRecordStore, loadRecordStore, upsertRecord } = require('../../dist/extension/backend/capabilities/vscodeStorage/recordStore.js');
 
+test('整目录保存只发布变化记录，无变化不写索引，删除和缺失文件仍可修复', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'limcode-record-delta-'));
+  try {
+    const paths = createVscodeStoragePaths(vscode.Uri.file(root));
+    const store = paths.modelProfilesRootUri, index = paths.modelProfilesIndexUri;
+    const save = records => saveRecordStore(store, index, records, 'modelProfile', r => r.id, { pruneMissing: true });
+    const records = [{ id: 'one', model: 'a' }, { id: 'two', model: 'b' }, { id: 'three', model: 'c' }];
+    await save(records);
+    const files = JSON.parse(await fs.readFile(index.fsPath, 'utf8')).records;
+    const otherPath = path.join(store.fsPath, files[1].file);
+    const other = await fs.readFile(otherPath, 'utf8');
+    records[0].model = 'changed';
+    await save(records);
+    assert.equal(await fs.readFile(otherPath, 'utf8'), other);
+    const unchangedIndex = await fs.readFile(index.fsPath, 'utf8');
+    await save(records.map(r => ({ model: r.model, id: r.id })));
+    assert.equal(await fs.readFile(index.fsPath, 'utf8'), unchangedIndex, 'semantic equality includes reordered object keys');
+    await fs.rm(otherPath);
+    await save(records);
+    assert.equal(JSON.parse(await fs.readFile(otherPath, 'utf8')).modelProfile.model, 'b');
+    await fs.writeFile(otherPath, '');
+    await save(records);
+    assert.equal(JSON.parse(await fs.readFile(otherPath, 'utf8')).modelProfile.model, 'b');
+    await save(records.slice(0, 2));
+    assert.deepEqual((await loadRecordStore(store, index, 'modelProfile')).map(r => r.id), ['one', 'two']);
+    await assert.rejects(fs.readFile(path.join(store.fsPath, files[2].file)), { code: 'ENOENT' });
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
 test('GREEN: detach 不立即拒绝已提交到 recordStore 的保存，标记为状态未知', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'limcode-barrier-detach-fix-'));
   try {

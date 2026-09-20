@@ -101,7 +101,6 @@ const TRACKED_VERIFICATION_SOURCE_ALLOWLIST = new Set([
   'tests/reliable-kernel/claude-cross-model-thinking-replay.test.mjs',
   'tests/reliable-kernel/provider-websocket-policy.test.mjs',
   'tests/reliable-kernel/session-thinking-runtime.test.mjs',
-  'tests/reliable-kernel/session-thinking-cache.test.mjs',
   'tests/reliable-kernel/session-thinking-control.test.mjs',
   'tests/reliable-kernel/session-thinking-simple.test.mjs',
   'tests/reliable-kernel/session-thinking-store.test.cjs',

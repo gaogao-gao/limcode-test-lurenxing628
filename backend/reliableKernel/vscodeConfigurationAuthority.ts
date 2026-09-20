@@ -1,5 +1,3 @@
-﻿import { SessionThinkingReadCache } from './sessionThinkingReadCache';
-import { createStorageRevision } from '../capabilities/vscodeStorage/storageRevision';
 import { loadScopedModelProfiles } from './scopedModelProfiles';
 import { hasThinkingBodyConflict } from '../../shared/sessionThinkingBody';
 import { applySessionThinkingOverride, validateSessionThinkingOverride } from '../../shared/sessionThinking';
@@ -147,7 +145,6 @@ interface CurrentWorkspaceFolder {
 export class VscodeConfigurationAuthority implements TurnAuthorityCompiler, AttachmentSettingsAuthority {
   public readonly mutations: VscodeConfigurationMutations;
   /** Host-local workspace presence; shared WorkEnvironment records must not encode another Host's view. */
-  private readonly effectiveModelCache = new SessionThinkingReadCache<ChatModelOverrideRecord>();
   private readonly effectiveModelReads = new Map<string, Promise<ChatModelOverrideRecord>>();
   private currentWorkspaceFolderIds = new Set<string>();
   private currentWorkspaceFolderRecords = new Map<string, WorkEnvironmentRecord>();
@@ -176,11 +173,7 @@ export class VscodeConfigurationAuthority implements TurnAuthorityCompiler, Atta
         conversationId, executorAgentId, turnId: `model-profile-observation:${conversationId}`, intentKind: 'input'
       });
       this.mutations.captureModelProfileRoot(capture.authorityId);
-      const revision = createStorageRevision(records);
-      const model = await this.effectiveModelCache.get({ providerConfigId: provider.id, model: modelId,
-        authorityId: capture.authorityId, revision }, async () => ({ providerConfigId: provider.id, provider: provider.provider, model: modelId }));
-      this.mutations.captureModelProfileRoot(capture.authorityId);
-      return { ...model };
+      return { providerConfigId: provider.id, provider: provider.provider, model: modelId };
     })();
     this.effectiveModelReads.set(readKey, pending);
     void pending.finally(() => { if (this.effectiveModelReads.get(readKey) === pending) this.effectiveModelReads.delete(readKey); }).catch(() => undefined);

@@ -97,6 +97,37 @@ test('子继承可开关，恢复思维默认保留独立的子继承选择', as
   });
 });
 
+test('会话思维保存不重写其他会话的配置，确认后可以发送', async () => {
+  await fixture(async f => {
+    const { paths } = f.configuration.mutations.captureModelProfileRoot();
+    const seed = async (root, index, key, make) => {
+      const savedAt = '2020-01-01T00:00:00.000Z';
+      await fs.mkdir(path.join(root.fsPath, 'records'), { recursive: true });
+      const records = Array.from({ length: 874 }, (_, i) => make(i));
+      await Promise.all(records.map(record => fs.writeFile(path.join(root.fsPath, 'records', `${record.id}.json`), JSON.stringify({ schemaVersion: 1, savedAt, [key]: record }))));
+      await fs.writeFile(index.fsPath, JSON.stringify({ schemaVersion: 1, savedAt, records: records.map(record => ({ id: record.id, file: `records/${record.id}.json`, updatedAt: savedAt })) }));
+      const untouched = path.join(root.fsPath, 'records', `${records[0].id}.json`);
+      return { untouched, bytes: await fs.readFile(untouched, 'utf8') };
+    };
+    const profiles = await seed(paths.modelProfilesRootUri, paths.modelProfilesIndexUri, 'modelProfile', i => ({ id: `historical-profile-${i}`, name: 'Historical', providerConfigId: f.provider.id, provider: f.provider.provider, model: f.provider.model }));
+    const links = await seed(paths.modelProfileScopeLinksRootUri, paths.modelProfileScopeLinksIndexUri, 'link', i => ({ id: `historical-link-${i}`, scopeKind: 'conversation', scopeId: `historical-conversation-${i}`, modelProfileId: `historical-profile-${i}`, role: 'active', createdAt: 1, updatedAt: 1 }));
+    const { send, receive, T } = scopeRouter(f);
+    const scope = { scopeKind: 'conversation', scopeId: 'parent' };
+    send('large-read', T.ModelProfileScopeRead, scope);
+    const initial = await receive('large-read');
+    const start = performance.now();
+    send('large-save', T.ModelProfileScopeSet, { ...scope, ...initial.effectiveModel, expectedEffectiveModel: initial.effectiveModel,
+      authorityId: initial.authorityId, sessionId: initial.sessionId, expectedRevision: initial.revision,
+      operation: 'thinking', thinkingOverride: { kind: 'openai-effort', value: 'high' } });
+    const saved = await receive('large-save', 60000);
+    console.log(`large-scope save: ${Math.round(performance.now() - start)} ms`);
+    assert.equal(saved.outcome, 'committed', saved.error);
+    for (const other of [profiles, links]) assert.equal(await fs.readFile(other.untouched, 'utf8'), other.bytes);
+    assert.equal((await f.app.agentLoop.runInput(f.input('large-scope-send'))).terminalStatus, 'completed');
+    assert.equal(f.wires.at(-1).body.reasoning_effort, 'high');
+  });
+});
+
 async function fixture(run, hooks = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'limcode-session-thinking-runtime-'));
   let app, coordinator;
@@ -181,8 +212,8 @@ function scopeRouter(f, onMessage = () => {}) {
       if (!webviews.has(client)) webviews.set(client, { async postMessage(message) { messages.push(structuredClone(message)); onMessage(message); return true; } });
       router.handle(client, webviews.get(client), { id, type, payload });
     },
-    async receive(id) {
-      const deadline = Date.now() + 8000;
+    async receive(id, timeoutMs = 8000) {
+      const deadline = Date.now() + timeoutMs;
       while (!messages.some(message => message.correlationId === id)) { if (Date.now() > deadline) throw new Error(`No response: ${id}`); await new Promise(resolve => setTimeout(resolve, 5)); }
       return messages.find(message => message.correlationId === id).payload;
     }
@@ -626,6 +657,43 @@ test('已排队输入在实际新请求冻结时采用新值，不追改在途�
   } });
 });
 
+test('运行中的子 Agent 默认排队续聊，保留当前执行和同一会话', async () => {
+  let releaseChild;
+  const childGate = new Promise(resolve => { releaseChild = resolve; });
+  await fixture(async f => {
+    try {
+      const parent = await f.app.agentLoop.runInput(f.input('queue-followup'));
+      assert.equal(parent.terminalStatus, 'completed');
+      const children = await f.list('ChildExecution');
+      assert.equal(children.length, 1, 'follow-up must not spawn another child');
+      const [active] = await f.list('ChildExecutionActiveTurnLink', { child_execution_id: children[0].id });
+      assert.ok(active, 'first child turn remains active');
+      const pending = await f.list('ChildExecutionIntentLink', { child_execution_id: children[0].id, state: 'pending' });
+      assert.equal(pending.length, 1);
+      releaseChild();
+      await f.coordinator.waitForIdle();
+      await f.coordinator.recoverStartup();
+      await f.coordinator.waitForIdle();
+      const turns = await f.list('ChildExecutionTurnLink', { child_execution_id: children[0].id });
+      assert.equal(turns.length, 2);
+      for (const turn of turns) {
+        const [terminal] = await f.list('TurnTermination', { turn_id: turn.turn_id });
+        assert.equal(terminal.terminal_status, 'completed');
+      }
+    } finally { releaseChild(); }
+  }, { async send(request, controls, f) {
+    let part = { text: 'done' };
+    const count = f.requests.filter(r => r.conversationId === request.conversationId).length;
+    if (request.conversationId === 'parent' && count === 1) part = { id: 'spawn-queued', functionCall: { name: 'run_agent', args: { prompt: 'investigate', taskName: 'Investigate send failure' } } };
+    if (request.conversationId === 'parent' && count === 2) {
+      const ref = request.recipe.modelHandleCatalog.entries.find(e => e.kind === 'child').ref;
+      part = { id: 'followup-queued', functionCall: { name: 'run_agent', args: { childRef: ref, prompt: 'also verify configuration saving' } } };
+    }
+    if (request.conversationId !== 'parent' && count === 1) await childGate;
+    await controls.onEvent({ kind: 'completed', streamSeq: '1', content: { role: 'model', parts: [part] } });
+  } });
+});
+
 test('实际 coordinator 从父工具创建/嵌套/继续子会话：最终普通 wire 不继承父覆盖', async () => {
   await fixture(async f => {
     await f.set('parent', 'high');
@@ -643,11 +711,19 @@ test('实际 coordinator 从父工具创建/嵌套/继续子会话：最终普�
     await f.coordinator.inputFromConversation({ commandId: 'continue-child', childExecutionId: child.id, conversationId: child.child_conversation_id, content: 'continue synthetic child' });
     await f.coordinator.waitForIdle();
     assert.equal(f.wires.filter(w => w.conversationId === child.child_conversation_id).at(-1).body.reasoning_effort, 'medium');
+    const oldCatalog = f.requests.filter(r => r.conversationId === 'parent').at(-1).recipe.modelHandleCatalog;
+    await f.app.agentLoop.runInput(f.input('parent-sees-completed-children'));
+    const next = f.requests.filter(r => r.conversationId === 'parent').at(-1);
+    assert.ok(next.recipe.runtimeStatusCard.children.some(c => c.status === 'idle' && c.resumable));
+    assert.match(next.recipe.runtimeStatusCard.card, /"childRef":"A1"/);
+    for (const ref of oldCatalog.entries.filter(e => e.kind === 'child')) {
+      assert.deepEqual(next.recipe.modelHandleCatalog.entries.find(e => e.target === ref.target), ref);
+    }
   }, {
     async send(request, controls, f) {
       const depth = request.conversationId === 'parent' ? 0 : new Set(f.requests.filter(r => r.conversationId !== 'parent').map(r => r.conversationId)).size;
       const first = f.requests.filter(r => r.conversationId === request.conversationId).length === 1;
-      await controls.onEvent({ kind: 'completed', streamSeq: '1', content: { role: 'model', parts: first && depth < 2 ? [{ id: `delegate-${depth}`, functionCall: { name: 'run_agent', args: { prompt: 'synthetic child', agent: { type: 'worker' } } } }] : [{ text: 'done' }] } });
+      await controls.onEvent({ kind: 'completed', streamSeq: '1', content: { role: 'model', parts: first && depth < 2 ? [{ id: `delegate-${depth}`, functionCall: { name: 'run_agent', args: { prompt: 'synthetic child', taskName: `Investigate level ${depth}`, agent: { type: 'worker' } } } }] : [{ text: 'done' }] } });
     }
   });
 });
